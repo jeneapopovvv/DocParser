@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+httpx==0.28.1
+pydantic
+slowapi
+pdf2image
+pillow
+python-multipart
+pyyaml
