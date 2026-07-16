@@ -395,6 +395,16 @@ def parse_data(response: dict) -> dict:
     banking = _clean_section(response.get("bankingData"), VALID_BANKING_FIELDS)
     identity = _clean_section(response.get("identityData"), VALID_IDENTITY_FIELDS)
 
+    # Required-field enforcement: a section is discarded (null) when its key
+    # identifier is missing or empty after normalization.
+    if identity is not None and not identity.get("personalNumber"):
+        logger.info("parse_data: identityData dropped, missing personalNumber")
+        identity = None
+
+    if banking is not None and not banking.get("iban"):
+        logger.info("parse_data: bankingData dropped, missing iban")
+        banking = None
+
     if banking is None and identity is None:
         return None
 
