@@ -1,0 +1,83 @@
+version: '3.8'
+
+services:
+  server:
+    build: ./src 
+    container_name: doc_parser_server
+    ports:
+      - "6060:6060" 
+    environment:
+      - VLLM_TIMEOUT=60 #seconds
+      - VLLM_URL=http://vllm:8000/v1/chat/completions
+      - LOG_LEVEL=DEBUG
+      - SAVE_INVALID_FILES=true
+      - MAX_IMAGES=3 #not enough VRAM to run batch image inference
+    #depends_on:
+    #  vllm:
+    #    condition: service_healthy 
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6060/health"]
+      interval: 60s
+      timeout: 10s
+      retries: 5
+    logging:
+      options:
+        max-size: 50mb
+        max-file: 100
+    restart: unless-stopped
+    networks:
+      - default_network
+      - internal_network
+
+  
+  vllm:
+    image: vllm/vllm-openai:v0.25.1-cu129-ubuntu2404
+    container_name: doc_parser_vllm
+    command: >
+      --model=Qwen/Qwen3.5-2B
+      --gpu-memory-utilization=0.5
+      --max-num-seqs=5
+      --max-model-len=6098
+      --dtype=half
+      --trust-remote-code
+      --override-generation-config='{"temperature": 0.0, "top_k": 20, "top_p": 0.8}'
+      --generation-config='vllm'
+      --mm-processor-kwargs='{"min_pixels": 784, "max_pixels": 1003520, "fps": 1}'
+      --attention-backend='TRITON_ATTN'
+      --no-enable-prefix-caching
+      --mm-processor-cache-gb=0
+      --limit-mm-per-prompt='{"image": 3, "video": 0, "audio": 0}'
+    volumes:
+      - doc_parser_hf_cache:/root/.cache/huggingface
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu] 
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 60s
+      timeout: 10s
+      retries: 5
+    logging:
+      options:
+        max-size: 50mb
+        max-file: 100
+    restart: unless-stopped
+    networks:
+      - default_network # This network should be used for initialization to download the model
+      - internal_network # This should be the default network after initialization
+
+volumes:
+  doc_parser_hf_cache:
+
+networks:
+  default_network:
+    driver: bridge
+  internal_network:
+    internal: true
