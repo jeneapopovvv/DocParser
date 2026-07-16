@@ -50,7 +50,7 @@ services:
     volumes:
       - doc_parser_hf_cache:/root/.cache/huggingface
     environment:
-      - HUGGING_FACE_HUB_TOKEN=
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
     ipc: host
     deploy:
       resources:
