@@ -240,7 +240,7 @@ VALID_BANKING_FIELDS = {
     "name", "accountType", "accountNumber", "iban", "branch", "date", "bic"
 }
 VALID_IDENTITY_FIELDS = {
-    "personalNumber", "nationality", "name", "dateOfBirth", "expiryDate", "gender"
+    "personalNumber", "nationality", "name", "nameAr", "dateOfBirth", "expiryDate", "gender"
 }
 
 
