@@ -535,9 +535,7 @@ async def doc_parser_exception_handler(request: Request, exc: DocParserException
 
 
 @app.post("/process")
-#@limiter.limit("1/minute")
 async def process_file(
-    request: Request,
     file: UploadFile = File(...)
 ):
     global request_count, invalid_count, valid_count, process_time_history, error_count, invalid_list
@@ -569,7 +567,7 @@ async def process_file(
 
         elif file_ext == ".png":
             base64 = image_to_base64(file, "PNG")
-            images_to_analyze.append(f"data:image/bmp;base64,{base64}")
+            images_to_analyze.append(f"data:image/png;base64,{base64}")
             
         elif file_ext == ".pdf":
             images_to_analyze = pdf_to_images(file, max_pages=MAX_IMAGES)
@@ -628,7 +626,7 @@ async def health_check():
     total, avg = avg_processing_time()
     return {
         "status": "healthy",
-        "accepted": ".jpg, .jpeg, .bmp, .pdf",
+        "accepted": ".jpg, .jpeg, .png, .bmp, .pdf",
         "requests": request_count,
         "valid": valid_count,
         "invalid": invalid_count,
