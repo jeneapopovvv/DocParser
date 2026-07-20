@@ -23,7 +23,15 @@ from typing import Optional
 import re
 import yaml
 import shutil
+from starlette.middleware.base import BaseHTTPMiddleware
 
+
+class RemoveHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        response.headers.pop("content-length", None)
+        response.headers.pop("date", None)
+        return response
 
 class DocParserException(Exception):
     def __init__(self, status_code: int, error: str, task_id: str):
@@ -66,6 +74,7 @@ app.add_middleware(
   allow_methods=["*"],
   allow_headers=["*"],
 )
+app.add_middleware(RemoveHeadersMiddleware)
 
 # Configuration
 UPLOAD_DIR = Path("uploads")
