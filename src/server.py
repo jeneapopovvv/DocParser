@@ -1,5 +1,5 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
 import os
@@ -23,15 +23,6 @@ from typing import Optional
 import re
 import yaml
 import shutil
-from starlette.middleware.base import BaseHTTPMiddleware
-
-
-class RemoveHeadersMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request, call_next):
-        response = await call_next(request)
-        response.headers.pop("content-length", None)
-        response.headers.pop("date", None)
-        return response
 
 class DocParserException(Exception):
     def __init__(self, status_code: int, error: str, task_id: str):
@@ -74,7 +65,6 @@ app.add_middleware(
   allow_methods=["*"],
   allow_headers=["*"],
 )
-app.add_middleware(RemoveHeadersMiddleware)
 
 # Configuration
 UPLOAD_DIR = Path("uploads")
@@ -520,6 +510,17 @@ def avg_processing_time():
 
 def make_file_id(file: UploadFile) -> str:
     return f"{file.filename}:{file.size}"
+
+
+
+@app.middleware("http")
+async def remove_headers(request: Request, call_next):
+    response: Response = await call_next(request)
+    if "content-length" in response.headers:
+        del response.headers["content-length"]
+    if "date" in response.headers:
+        del response.headers["date"]
+    return response
 
 
 @app.exception_handler(DocParserException)
