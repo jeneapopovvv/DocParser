@@ -27,7 +27,7 @@ identification: |
               "personalNumber": "Personal number (exactly as printed)",
               "nationality": "Nationality",
               "name": "Full name (exactly as printed)",
-              "nameAr": "Full name (not translated)",
+              "nameAr": "Full name in arabic",
               "dateOfBirth": "Date of birth in format DD/MM/YYYY",
               "expiryDate": "Expiry date in format DD/MM/YYYY",
               "gender": "Gender (M/F)"
