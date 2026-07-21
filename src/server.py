@@ -242,7 +242,9 @@ VALID_BANKING_FIELDS = {
 VALID_IDENTITY_FIELDS = {
     "personalNumber", "nationality", "name", "nameAr", "dateOfBirth", "expiryDate", "gender"
 }
-
+ACCEPTED_DOCUMENT_TYPES = [
+    "passport", "national_id", "driver_license"
+]
 
 def _normalize_string(value) -> Optional[str]:
     """Strip stray quotes/whitespace and reject non-meaningful values."""
@@ -389,6 +391,10 @@ def parse_data(response: dict) -> dict:
 
     # The LLM may return a sentinel string indicating a rejected document
     if isinstance(response, dict) and set(response.keys()) <= {"other"}:
+        return None
+
+    docType = response.get('documentType')
+    if docType not in ACCEPTED_DOCUMENT_TYPES:
         return None
 
     banking = _clean_section(response.get("bankingData"), VALID_BANKING_FIELDS)
