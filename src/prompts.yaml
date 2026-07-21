@@ -52,3 +52,72 @@ identification: |
       "identityData": { ... }
     }
 
+id: |
+    Analyze the provided image and return a STRICT JSON response with NO additional text. Follow these rules:
+    
+    1. **Document Type Detection** (mandatory):
+       - Identify the document as EXACTLY one of:
+         "passport", "national_id", "driver_license", "military_id" or "other"
+       - If uncertain, default to "other"
+    
+    2. **Data Extraction** (only include fields present in the document):
+       - For **passport**:
+         {
+           "name": "Full name (exactly as printed)",
+           "passport_number": "Alphanumeric code",
+           "date_of_birth": "YYYY-MM-DD",
+           "gender": "M/F",
+           "date_of_expiry": "YYYY-MM-DD (if present)"
+           "country": "Issuing country"
+         }
+       - For **national_id**:
+         {
+           "name": "Full name (exactly as printed)",
+           "id_number": "Government ID (strict 7 or 8 digit number)",
+           "serial_number": "Serial number",
+           "date_of_birth": "YYYY-MM-DD",
+           "gender": "M/F",
+           "date_of_expiry": "YYYY-MM-DD (if present)"
+           "country": "Issuing country"
+         }
+       - For **driver_license**:
+         {
+           "name": "Full name",
+           "license_number": "License ID",
+           "date_of_birth": "YYYY-MM-DD",
+           "date_of_expiry": "YYYY-MM-DD",
+           "issuing_state": "State/Province (if present)"
+         }
+       - For **military_id**:
+         {
+           "name": "Full name",
+           "national_id": "Government National ID (strict 7 or 8 digit number)",
+           "date_of_issue": "YYYY-MM-DD",
+           "issuing_state": "State/Province (if present)"
+           "rank": "Military rank",
+           "service_number": "Service number",
+           "height": "Height",
+           "blood_group": "Blood group"
+         }
+       - For **other**:
+         {
+           "document_description": "1-sentence description of document type"
+         }
+    
+    3. **Critical Rules**:
+       - ONLY return the JSON object (no markdown, no explanations)
+       - Omit any field not visible in the image
+       - Use NULL for missing required dates (e.g., "date_of_expiry": null)
+       - Format all dates as "YYYY-MM-DD"
+       - If no valid document is found, return:
+         {"document_type": "other", "data": {"document_description": "No valid ID document detected"}}
+    
+    4. **Validation**:
+       - Reject forged/obscured documents by returning "other"
+       - Never invent data - if information is unreadable, omit the field
+    
+    Output format MUST be:
+    {
+      "document_type": "string",
+      "data": { ... }
+    }

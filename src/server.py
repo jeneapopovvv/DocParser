@@ -426,7 +426,7 @@ async def analyze_images(images: List[str]) -> dict:
                 }
             })
         
-        prompt = prompt_config['identification']
+        prompt = prompt_config['id']
 
         messages = [
             {
