@@ -10,7 +10,7 @@ services:
       - VLLM_TIMEOUT=60 #seconds
       - VLLM_URL=http://vllm:8000/v1/chat/completions
       - LOG_LEVEL=DEBUG
-      - SAVE_INVALID_FILES=true
+      - SAVE_INVALID_FILES=false
       - MAX_IMAGES=3 #not enough VRAM to run batch image inference
     #depends_on:
     #  vllm:

@@ -383,7 +383,7 @@ def parse_data(response: dict) -> dict:
     input is not a valid document structure.
     '''
 
-    if not isinstance(response, dict):
+    if response is None or not isinstance(response, dict):
         logger.warning("parse_data: response is not a dict, returning None")
         return None
 
@@ -475,13 +475,17 @@ async def analyze_images(images: List[str]) -> dict:
             result = response.json()
             
             content = result["choices"][0]["message"]["content"]
+            json = None
             try:
-                response = json.loads(extract_json_content(content))
+                json = json.loads(extract_json_content(content))
             except (json.JSONDecodeError, ValueError, TypeError):
                 logger.error("Failed to process file. LLM output is not valid JSON.")
-                return None
 
-            return parse_data(response)
+            data = parse_data(json)
+            if data is None:
+                logger.error(f"Failed to extract data. {content}")
+
+            return data
             
     except httpx.TimeoutException:
         logger.error("Failed to process file. Request timed out.")
