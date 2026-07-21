@@ -1,7 +1,7 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List, Optional
+from typing import List, Optional, Union
 import os
 import uuid
 from pathlib import Path
@@ -16,7 +16,7 @@ import time
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from enum import Enum
 import json
 from typing import Optional
@@ -89,6 +89,11 @@ MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 MIN_FILE_SIZE = 1024  # 1KB
 
 
+class Base64FileRequest(BaseModel):
+    """Request model for base64 encoded file"""
+    filename: str = Field(..., description="Original filename with extension")
+    content: str = Field(..., description="Base64 encoded file content")
+
 
 def get_error_details(error: str, task_id: str):
     return {
@@ -97,7 +102,7 @@ def get_error_details(error: str, task_id: str):
     }
 
 
-def validate_file_size(file: UploadFile) -> bool:
+def validate_file_size(file) -> bool:
     """Validate file size"""
     file.file.seek(0, 2)
     file_size = file.file.tell()
@@ -525,9 +530,52 @@ def avg_processing_time():
     return total, avg
 
 
-def make_file_id(file: UploadFile) -> str:
+def make_file_id(file) -> str:
     return f"{file.filename}:{file.size}"
 
+
+def decode_base64_file(request: Base64FileRequest) -> UploadFile:
+    """Decode base64 string to UploadFile-like object"""
+    try:
+        file_content = base64.b64decode(request.file_base64)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail="Invalid base64 encoding")
+
+    file_size = len(file_content)
+    if file_size < MIN_FILE_SIZE or file_size > MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid file size. The file size must be between {MIN_FILE_SIZE / 1024} KB and {MAX_FILE_SIZE / (1024*1024)} MB."
+        )
+
+    file_ext = get_file_extension(request.filename)
+    if file_ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type. Allowed: {', '.join(ALLOWED_EXTENSIONS)}"
+        )
+
+    # Create a BytesIO object that behaves like an UploadFile
+    file_obj = BytesIO(file_content)
+    file_obj.seek(0)
+
+    class Base64UploadFile:
+        def __init__(self, filename: str, file_obj: BytesIO, size: int):
+            self.filename = filename
+            self.file = file_obj
+            self.size = size
+            self.content_type = None
+
+        def seek(self, offset: int, whence: int = 0):
+            return self.file.seek(offset, whence)
+
+        def tell(self):
+            return self.file.tell()
+
+        def read(self, size: int = -1):
+            return self.file.read(size)
+
+    return Base64UploadFile(request.filename, file_obj, file_size)
 
 
 @app.middleware("http")
@@ -553,7 +601,8 @@ async def doc_parser_exception_handler(request: Request, exc: DocParserException
 
 @app.post("/process")
 async def process_file(
-    file: UploadFile = File(...)
+    file: Optional[UploadFile] = File(None),
+    base64_request: Optional[Base64FileRequest] = None
 ):
     global request_count, invalid_count, valid_count, process_time_history, error_count, invalid_list
 
@@ -561,6 +610,14 @@ async def process_file(
     start_time = time.perf_counter()
 
     try:
+        # Handle base64 input
+        if base64_request is not None:
+            if file is not None:
+                raise HTTPException(status_code=400, detail="Provide either file or base64_request, not both")
+            file = decode_base64_file(base64_request)
+        elif file is None:
+            raise HTTPException(status_code=400, detail="Provide either file (multipart) or base64_request (JSON)")
+
         file_id = make_file_id(file)
         request_count += 1
         if not validate_file_size(file):
