@@ -475,17 +475,17 @@ async def analyze_images(images: List[str]) -> dict:
             result = response.json()
             
             content = result["choices"][0]["message"]["content"]
-            json = None
+            jsonData = None
             try:
-                json = json.loads(extract_json_content(content))
+                jsonData = json.loads(extract_json_content(content))
             except (json.JSONDecodeError, ValueError, TypeError):
                 logger.error("Failed to process file. LLM output is not valid JSON.")
 
-            data = parse_data(json)
-            if data is None:
+            response = parse_data(jsonData)
+            if response is None:
                 logger.error(f"Failed to extract data. {content}")
 
-            return data
+            return response
             
     except httpx.TimeoutException:
         logger.error("Failed to process file. Request timed out.")
