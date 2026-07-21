@@ -400,6 +400,9 @@ def parse_data(response: dict) -> dict:
     banking = _clean_section(response.get("bankingData"), VALID_BANKING_FIELDS)
     identity = _clean_section(response.get("identityData"), VALID_IDENTITY_FIELDS)
 
+    if identity is not None and identity.get("documentType"):
+        identity["documentType"] = docType
+
     # Required-field enforcement: a section is discarded (null) when its key
     # identifier is missing or empty after normalization.
     if identity is not None and not identity.get("personalNumber"):
