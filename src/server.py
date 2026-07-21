@@ -537,7 +537,7 @@ def make_file_id(file) -> str:
 def decode_base64_file(request: Base64FileRequest) -> UploadFile:
     """Decode base64 string to UploadFile-like object"""
     try:
-        file_content = base64.b64decode(request.file_base64)
+        file_content = base64.b64decode(request.content)
     except Exception as e:
         raise HTTPException(status_code=400, detail="Invalid base64 encoding")
 
@@ -601,8 +601,8 @@ async def doc_parser_exception_handler(request: Request, exc: DocParserException
 
 @app.post("/process")
 async def process_file(
+    request: Request,
     file: Optional[UploadFile] = File(None),
-    base64_request: Optional[Base64FileRequest] = None
 ):
     global request_count, invalid_count, valid_count, process_time_history, error_count, invalid_list
 
@@ -610,13 +610,18 @@ async def process_file(
     start_time = time.perf_counter()
 
     try:
-        # Handle base64 input
-        if base64_request is not None:
-            if file is not None:
-                raise HTTPException(status_code=400, detail="Provide either file or base64_request, not both")
-            file = decode_base64_file(base64_request)
-        elif file is None:
-            raise HTTPException(status_code=400, detail="Provide either file (multipart) or base64_request (JSON)")
+        # Handle base64 input from JSON body
+        if file is None:
+            content_type = request.headers.get("content-type", "")
+            if "application/json" in content_type:
+                try:
+                    body = await request.json()
+                    base64_request = Base64FileRequest(**body)
+                    file = decode_base64_file(base64_request)
+                except Exception:
+                    raise HTTPException(status_code=400, detail="Invalid base64 request body")
+            else:
+                raise HTTPException(status_code=400, detail="Provide either file (multipart) or base64_request (JSON)")
 
         file_id = make_file_id(file)
         request_count += 1
