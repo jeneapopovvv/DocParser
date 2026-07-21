@@ -9,7 +9,7 @@ identification: |
     
     1. **Document Type Detection** (mandatory):
        - Identify the document as EXACTLY one of:
-         "passport", "national_id", "driver_license" or "other"
+         "passport", "identity_card", "driver_license" or "other"
        - If uncertain, default to "other"
     
     2. **Data Extraction** (only include fields present in the document):
@@ -23,7 +23,7 @@ identification: |
             "expiryDate": "Expiry date in format DD/MM/YYYY",
             "gender": "Gender (M/F)"
           }
-       - For **national_id**:
+       - For **identity_card**:
           {
             "personalNumber": "Personal number (exactly as printed)",
             "nationality": "Nationality",
@@ -68,8 +68,7 @@ identification: |
       "identityData": { ... },
       "bankingData": {
         "name": "Customer name (exactly as printed)",
-        "accountType": "Type of A/c",
-        "accountNumber": "A/c No.",
+        "bankAccountNumber": "A/c No.",
         "iban": "IBAN code (exactly as printed)",
         "branch": "Bank branch",
         "date": "Date in format DD/MM/YYYY",

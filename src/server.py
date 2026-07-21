@@ -237,13 +237,13 @@ def pdf_to_images(file: UploadFile, max_pages: int = None) -> List[str]:
 
 
 VALID_BANKING_FIELDS = {
-    "name", "accountType", "accountNumber", "iban", "branch", "date", "bic"
+    "name", "bankAccountNumber", "iban", "branch", "date", "bic"
 }
 VALID_IDENTITY_FIELDS = {
     "personalNumber", "nationality", "name", "nameAr", "dateOfBirth", "expiryDate", "gender"
 }
 ACCEPTED_DOCUMENT_TYPES = [
-    "passport", "national_id", "driver_license"
+    "passport", "identity_card", "driver_license"
 ]
 
 def _normalize_string(value) -> Optional[str]:
@@ -393,18 +393,15 @@ def parse_data(response: dict) -> dict:
     if isinstance(response, dict) and set(response.keys()) <= {"other"}:
         return None
 
-    docType = response.get('documentType')
-    if docType not in ACCEPTED_DOCUMENT_TYPES:
-        return None
+    documentType = response.get('documentType')
+    validDocumentType = documentType in ACCEPTED_DOCUMENT_TYPES
 
     banking = _clean_section(response.get("bankingData"), VALID_BANKING_FIELDS)
     identity = _clean_section(response.get("identityData"), VALID_IDENTITY_FIELDS)
 
-    if identity is not None and identity.get("documentType"):
-        identity["documentType"] = docType
+    if validDocumentType and identity is not None:
+        identity["documentType"] = documentType
 
-    # Required-field enforcement: a section is discarded (null) when its key
-    # identifier is missing or empty after normalization.
     if identity is not None and not identity.get("personalNumber"):
         logger.info("parse_data: identityData dropped, missing personalNumber")
         identity = None
