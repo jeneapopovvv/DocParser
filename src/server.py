@@ -305,6 +305,11 @@ def _normalize_gender(value) -> Optional[str]:
         return "M"
     return None
 
+def _normalize_iban(value) -> Optional[str]:
+    if value is None:
+        return None
+    iban = "".join(ch for ch in str(value) if ch.isalnum())
+    return iban if len(iban) >= 20 else None
 
 def _normalize_field(field: str, value):
     """Apply field-specific normalization/corrections."""
@@ -312,6 +317,8 @@ def _normalize_field(field: str, value):
         return _normalize_date(value)
     if field == "gender":
         return _normalize_gender(value)
+    if field == "iban":
+        return _normalize_iban(value)
     return _normalize_string(value)
 
 
