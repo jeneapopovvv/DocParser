@@ -1,0 +1,294 @@
+from vllm import LLM, SamplingParams
+from PIL import Image, ImageOps
+import requests
+from io import BytesIO
+from transformers import AutoTokenizer, AutoProcessor
+import os
+from pdf2image import convert_from_path
+
+processor = AutoProcessor.from_pretrained("Qwen/Qwen3.5-2B", trust_remote_code=True)
+#processor = AutoProcessor.from_pretrained("Qwen/Qwen3-VL-2B-Instruct", trust_remote_code=True)
+ 
+
+
+def preprocess_document_image2(
+    image_path,
+    min_short_side=800,
+    max_long_side=1600,
+    target_max_size_bytes=1_200_000,  # 1.2 MB
+    initial_quality=95,
+    min_quality=70,
+):
+    """
+    Preprocess a document image:
+    - Enhance contrast
+    - Resize within bounds (no upscaling)
+    - Ensure final file size <= target_max_size_bytes
+    Returns: BytesIO object (JPEG format)
+    """
+    img = Image.open(image_path).convert("RGB")
+    
+    # Step 1: Enhance contrast
+    img = ImageOps.autocontrast(img, cutoff=2)
+    
+    # Step 2: Resize within bounds (do not upscale)
+    w, h = img.size
+    scale = min(
+        max_long_side / max(w, h),
+        min_short_side / min(w, h),
+        1.0  # no upscaling
+    )
+    if scale < 1.0:
+        new_w, new_h = int(w * scale), int(h * scale)
+        img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+    
+    # Step 3: Optimize file size to <= target_max_size_bytes
+    buffer = BytesIO()
+    
+    # Try initial high-quality save
+    img.save(buffer, format="JPEG", quality=initial_quality, optimize=True)
+    
+    if buffer.tell() <= target_max_size_bytes:
+        buffer.seek(0)
+        return buffer
+    
+    # If too large, reduce quality iteratively
+    quality = initial_quality
+    while quality >= min_quality:
+        buffer = BytesIO()
+        img.save(buffer, format="JPEG", quality=quality, optimize=True)
+        if buffer.tell() <= target_max_size_bytes:
+            buffer.seek(0)
+            return buffer
+        quality -= 5
+    
+    # If still too large after min_quality, downscale further
+    current_w, current_h = img.size
+    scale_factor = (target_max_size_bytes / buffer.tell()) ** 0.5  # approx. linear in area
+    scale_factor = max(scale_factor, 0.5)  # avoid extreme downscaling
+    
+    new_w = int(current_w * scale_factor)
+    new_h = int(current_h * scale_factor)
+    if new_w < 400 or new_h < 400:
+        # Safety: don't go below minimal legibility
+        new_w, new_h = max(new_w, 400), max(new_h, 400)
+    
+    img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+    
+    # Final attempt with min_quality
+    buffer = BytesIO()
+    img.save(buffer, format="JPEG", quality=min_quality, optimize=True)
+    
+    # If still over (rare), force truncate (not ideal, but meets spec)
+    if buffer.tell() > target_max_size_bytes:
+        # Re-encode at even lower quality as last resort
+        extra_low_q = max(50, min_quality - 10)
+        buffer = BytesIO()
+        img.save(buffer, format="JPEG", quality=extra_low_q, optimize=True)
+    
+    buffer.seek(0)
+    return buffer
+
+
+
+
+def preprocess_document_image(image_path, min_short_side=800, max_long_side=1600):
+    img = Image.open(image_path).convert("RGB")
+    
+    # Auto-contrast for better text clarity
+    img = ImageOps.autocontrast(img, cutoff=2)
+    
+    # Resize while preserving aspect ratio
+    w, h = img.size
+    scale = min(
+        max_long_side / max(w, h),
+        min_short_side / min(w, h),
+        1.0  # don't upscale
+    )
+    new_w, new_h = int(w * scale), int(h * scale)
+    img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+    
+    return img
+
+
+
+
+def build_request(images: list[Image.Image], question: str) -> dict:
+    """Build a single vLLM request dict for N images + a question."""
+    messages = [{
+        "role": "user",
+        "content": [
+            *[{"type": "image", "image": img} for img in images],
+            {"type": "text", "text": question},
+        ],
+    }]
+ 
+    prompt = processor.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False
+    )
+ 
+    return {
+        "prompt": prompt,
+        "multi_modal_data": {"image": images},
+    }
+
+    
+def inference():
+
+  
+    images=convert_from_path('/kaggle/input/datasets/glasse5/batch2/iban-eservices.pdf', first_page=1, last_page=3)
+
+    #images=[Image.open("/kaggle/input/datasets/glasse5/doc-list/doc_list/military_id2.jpg").convert("RGB")]
+    #system = "You are a reliable document classification and extraction engine. Your sole purpose is to analyze the provided image, clasify and extract information if its . Your entire response must be a single, valid JSON object, and you must include **no other text, explanations, or conversational filler**."
+
+    #system = "You are a reliable document classification and extraction engine. Your sole purpose is to analyze the provided image and clasify into few categories. Your entire response must be a single, valid JSON object, and you must include **no other text, explanations, or conversational filler**."
+
+    system = """
+You are a strict document-image classifier.
+
+Allowed labels:
+identity_card, driver_license, iban, lease_agreement, cr_certificate, passport, unknown
+
+Rules:
+- Classify each image into exactly one label.
+- Use lowercase labels exactly as shown.
+- Return only a valid JSON array of strings.
+- The array length must be {n}.
+- The order must match the image order.
+- Do not add explanations, markdown, code fences, or extra fields.
+- If unsure, use unknown.
+- Do not extract names, numbers, text, or personal data.
+    """
+
+    question = """
+        Analyze the provided image and return a STRICT JSON response with NO additional text. Follow these rules:
+    
+        1. **Document Type Detection** (mandatory):
+           - Identify if the document contains at least one of:
+             "passport", "identity_card", "driver_license", "iban", "lease_agreement", "cr_certificate" or "other"
+           - If uncertain, default to "other"
+           - If multiple types are detected, response must be modified accor
+           
+        2. **Critical Rules**:
+           - ONLY return the JSON object (no markdown, no explanations)
+           - Include only document types detected
+           - If no valid document type is found, return empty list:
+             []
+
+        Output format MUST be:
+        [
+            {
+              "documentType": "string",
+              "confidence": "number"
+            }
+        ]
+        """
+    
+    
+    question = """
+        Analyze the provided images and return a STRICT JSON LIST if the following document types are detected:
+        - "passport"
+        - "identity_card"
+        - "driver_license"
+        - "iban"
+        - "lease_agreement"
+        - "cr_certificate"
+        - "unknown"
+
+        Output format MUST be A LIST OF OBJECTS:
+        [
+            {
+              "documentType": "string",
+              "confidence": "number"
+            }
+        ]
+        """
+
+ 
+    
+    question = """
+        Analyze the provided images and return a STRICT JSON LIST if the following document types are detected.
+        Bellow is a list of document types with description:
+        - **passport**: "Passport"
+        - **identity_card**: "Government ID front/back"
+        - **driver_license**: "Driver License"
+        - **iban**: "Image contains IBAN code"
+        - **lease_agreement**: "Lease Agreement"
+        - **cr_certificate**: "Commercial Registration Certificate"
+        - **unknown**: "undefined"
+
+        **Output format STRICTLY MUST be A LIST OF OBJECTS**:
+        [
+            {
+              "imageType": "string",
+              "confidence": "number"
+            }
+        ]
+        """
+
+
+    question = """
+Analyze the provided images and return a STRICT JSON LIST if the following document types are detected:
+- "identity_card"
+- "driver_license"
+- "iban"
+- "cr_certificate"
+- "unknown"
+- "passport"
+- "lease_agreement"
+
+**Critical Rules**:
+- ONLY return the JSON object (no markdown, no explanations)
+- Include only document types detected
+- If no valid document type is found, return empty list: []
+             
+Output format MUST be A LIST OF OBJECTS:
+[{ "imageType": "string", "confidence": "number" }]
+    """
+    '''
+    
+
+
+
+- **identity_card**
+- **driver_license**
+- **iban**
+- **lease_agreement**
+- **cr_certificate**
+- **unknown**
+- **passport**
+    '''
+    #TODO add "imageNumber": "number",
+
+    
+    question = """
+Classify the images in order.
+        """
+    
+    request = build_request(
+        images=images,
+        question=question,
+    )
+
+
+    sampling_param = SamplingParams(
+                temperature=0.0,              # Your temperature value
+                top_p=0.1,                    # Your top_p value
+                top_k=20,                     # Your top_k value
+                #repetition_penalty=1.1,       # Your repetition_penalty value
+                #presence_penalty=1.5,         # Your presence_penalty value
+                max_tokens=4098,             # Your out_seq_length value
+            )
+    # Generate output
+    model_outputs = llm.generate([request], sampling_param)
+    
+
+    for output in model_outputs:
+        print(output.outputs[0].text)
+
+
+inference()
+
