@@ -31,8 +31,6 @@ services:
   extractor:
     image: vllm/vllm-openai:v0.25.1-cu129-ubuntu2404
     container_name: doc_parser_extractor
-    ports:
-      - "6063:8000"
     command: >
       --model=Qwen/Qwen3.5-2B
       --gpu-memory-utilization=0.45

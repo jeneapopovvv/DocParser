@@ -613,6 +613,11 @@ async def classify_images(images: List[str]) -> List[dict]:
     tasks = [_classify_one(i, img) for i, img in enumerate(images)]
     results = await asyncio.gather(*tasks)
 
+    logger.debug(f"Classifying {len(images)} images with concurrency={CLASSIFICATION_CONCURRENCY}")
+    logger.debug(f"Classification user prompt: {user_prompt}")
+    logger.debug(f"Classification system prompt: {sys_prompt}")
+    logger.debug(f"Classification results: {results}")
+
     return sorted(results, key=lambda x: x["pageIndex"])
 
 
@@ -675,6 +680,11 @@ async def extract_content(images: List[str], doc_type: str) -> dict:
         return None
 
     content = result["choices"][0]["message"]["content"]
+
+    logger.debug(f"Extraction system prompt for {doc_type}: {sys_prompt}")
+    logger.debug(f"Extraction user prompt for {doc_type}: {user_prompt}")
+    logger.debug(f"Extraction result for {doc_type}: {content}")
+
     try:
         json_data = json.loads(extract_json_content(content))
         return parse_data(json_data, schema)
