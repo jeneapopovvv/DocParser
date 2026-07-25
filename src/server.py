@@ -661,7 +661,7 @@ async def extract_content(images: List[str], doc_type: str) -> dict:
     messages = [
         {"role": "system", "content": [{"type": "text", "text": sys_prompt}]},
         {"role": "user", "content": [
-            {"type": "text", "text": f"The document type is: {doc_type}\n\n{user_prompt}"},
+            {"type": "text", "text": user_prompt},
             *[{"type": "image_url", "image_url": {"url": img}} for img in images]
         ]}
     ]
