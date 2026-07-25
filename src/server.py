@@ -575,9 +575,9 @@ def parse_data(response: dict, schema: dict) -> dict:
 
 async def classify_images(images: List[str]) -> List[dict]:
 
-    doc_types_list = "\n".join(f"    - {d}" for d in supported_documents)
-    user_prompt = (prompt_config.get('classification') or "").replace("{{listPlaceholder}}", doc_types_list)
-    sys_prompt = prompt_config.get('classification_system') or ""
+    doc_types_list = "\n".join(f"- {d}" for d in supported_documents)
+    user_prompt = prompt_config.get('classification', "").replace("{{listPlaceholder}}", doc_types_list)
+    sys_prompt = prompt_config.get('classification_system', "")
 
     semaphore = asyncio.Semaphore(CLASSIFICATION_CONCURRENCY)
 
@@ -590,7 +590,14 @@ async def classify_images(images: List[str]) -> List[dict]:
                     {"type": "image_url", "image_url": {"url": img}}
                 ]}
             ]
-            payload = {"messages": messages, "temperature": 0.0}
+
+            payload = {
+                "messages": messages, 
+                "temperature": 0.6,
+                "top_p": 0.8,
+                "top_k": 20,
+                "chat_template_kwargs": {"enable_thinking": True},
+            }
 
             try:
                 result = await _vllm_request(CLASSIFIER_URL, payload)
@@ -659,9 +666,13 @@ def group_pages(classifications: List[dict]) -> List[dict]:
 
 async def extract_content(images: List[str], doc_type: str) -> dict:
 
-    schema = document_schemas.get(doc_type, {})
-    sys_prompt = prompt_config.get('extraction_system') or ""
-    user_prompt = (prompt_config.get('extraction') or "").replace("{{jsonPlaceholder}}", json.dumps(schema, indent=2))
+    schema = document_schemas.get(doc_type, None)
+    if schema is None:
+        logger.error(f"Unsupported document type for extraction: {doc_type}")
+        return None
+    
+    sys_prompt = prompt_config.get('extraction_system', "")
+    user_prompt = prompt_config.get('extraction', "").replace("{{jsonPlaceholder}}", json.dumps(schema, indent=2))
 
     messages = [
         {"role": "system", "content": [{"type": "text", "text": sys_prompt}]},
@@ -671,7 +682,10 @@ async def extract_content(images: List[str], doc_type: str) -> dict:
         ]}
     ]
 
-    payload = {"messages": messages, "temperature": 0.0}
+    payload = {
+        "messages": messages, 
+        "temperature": 0.0
+    }
 
     result = await _vllm_request(EXTRACTOR_URL, payload)
 
