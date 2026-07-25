@@ -1,2 +1,4 @@
 .env
 .svn/
+__pycache__/
+*.pyc

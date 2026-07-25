@@ -19,45 +19,112 @@ from slowapi.errors import RateLimitExceeded
 from pydantic import BaseModel, Field
 from enum import Enum
 import json
-from typing import Optional
 import re
 import yaml
 import shutil
+import asyncio
+from contextlib import asynccontextmanager
+from config import supported_documents, document_schemas
 
-class DocParserException(Exception):
-    def __init__(self, status_code: int, error: str, task_id: str):
-        self.status_code = status_code
-        self.error = error
-        self.taskId = task_id
+
 
 
 def load_prompts(config_path: str = "prompts.yaml"):
-  with open(config_path, 'r', encoding='utf-8') as file:
+  resolved = Path(__file__).resolve().parent / config_path
+  if not resolved.exists():
+    resolved = Path(config_path)
+  with open(resolved, 'r', encoding='utf-8') as file:
     config = yaml.safe_load(file)
+  if not config or not isinstance(config, dict):
+    raise ValueError("prompts.yaml is empty or not a dict")
   return config
 
 
 prompt_config = load_prompts()
 
 
-error_count = 0
-request_count = 0
-valid_count = 0
-invalid_count = 0
-invalid_list: List[str] = []
-process_time_history: List[float] = []
+class _Stats:
+    """Thread-safe stats counters using asyncio.Lock."""
+    def __init__(self):
+        self._lock = asyncio.Lock()
+        self.error_count = 0
+        self.request_count = 0
+        self.valid_count = 0
+        self.invalid_count = 0
+        self._invalid_ids: dict = {}  # ordered set (insertion order preserved)
+        self.process_time_history: List[float] = []
 
-logging.basicConfig(level=logging.INFO)
+    async def inc_request(self):
+        async with self._lock:
+            self.request_count += 1
+
+    async def inc_valid(self):
+        async with self._lock:
+            self.valid_count += 1
+
+    async def inc_invalid(self, file_id: str):
+        async with self._lock:
+            if file_id not in self._invalid_ids:
+                self._invalid_ids[file_id] = None
+                self.invalid_count += 1
+                if len(self._invalid_ids) > 5000:
+                    self._invalid_ids = dict(list(self._invalid_ids.items())[-2500:])
+
+    async def inc_error(self):
+        async with self._lock:
+            self.error_count += 1
+
+    async def record_time(self, elapsed: float):
+        async with self._lock:
+            if len(self.process_time_history) > 1000:
+                self.process_time_history.pop(0)
+            self.process_time_history.append(elapsed)
+
+    async def snapshot(self) -> dict:
+        async with self._lock:
+            total = len(self.process_time_history)
+            avg = sum(self.process_time_history) / total if total else 0
+            return {
+                "requests": self.request_count,
+                "valid": self.valid_count,
+                "invalid": self.invalid_count,
+                "errors": self.error_count,
+                "avg_process_time": avg,
+            }
+
+
+stats = _Stats()
+
+_log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(level=getattr(logging, _log_level, logging.INFO))
 logger = logging.getLogger(__name__)
 
 
-limiter = Limiter(key_func=get_remote_address)
-app = FastAPI()
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+# Shared httpx client with connection pooling (created on startup, closed on shutdown)
+_http_client: Optional[httpx.AsyncClient] = None
 
 
-# CORS middleware
+@asynccontextmanager
+async def lifespan(app):
+    global _http_client
+    _http_client = httpx.AsyncClient(
+        timeout=httpx.Timeout(VLLM_TIMEOUT, connect=10.0),
+        limits=httpx.Limits(
+            max_connections=200,
+            max_keepalive_connections=100,
+            keepalive_expiry=300,
+        ),
+    )
+    asyncio.create_task(_periodic_cleanup())
+    yield
+    if _http_client:
+        await _http_client.aclose()
+        _http_client = None
+
+
+
+app = FastAPI(lifespan=lifespan)
+
 app.add_middleware(
   CORSMiddleware,
   allow_origins=["*"],
@@ -67,6 +134,28 @@ app.add_middleware(
 )
 
 # Configuration
+def _safe_float_env(key: str, default: float) -> float:
+    val = os.getenv(key)
+    if val is None:
+        return default
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        logger.warning(f"Invalid {key}={val!r}, using default {default}")
+        return default
+
+
+def _safe_int_env(key: str, default: int) -> int:
+    val = os.getenv(key)
+    if val is None:
+        return default
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        logger.warning(f"Invalid {key}={val!r}, using default {default}")
+        return default
+
+
 UPLOAD_DIR = Path("uploads")
 INVALID_DIR = UPLOAD_DIR / "invalid"
 ERROR_DIR = UPLOAD_DIR / "error"
@@ -78,15 +167,57 @@ for directory in [INVALID_DIR, ERROR_DIR]:
 
 
 
-VLLM_URL: str = os.getenv("VLLM_URL", "http://vllm:8000/v1/chat/completions")
-VLLM_TIMEOUT: float = float(os.getenv("VLLM_TIMEOUT", "30")) #default 30 sec
+CLASSIFIER_URL: str = os.getenv("CLASSIFIER_URL", "")
+EXTRACTOR_URL: str = os.getenv("EXTRACTOR_URL", "")
+VLLM_TIMEOUT: float = _safe_float_env("VLLM_TIMEOUT", 30.0)
+VLLM_MAX_RETRIES: int = _safe_int_env("VLLM_MAX_RETRIES", 0)
+CLASSIFICATION_CONCURRENCY: int = _safe_int_env("CLASSIFICATION_CONCURRENCY", 5)
+MIN_DISK_SPACE_GB: int = _safe_int_env("MIN_DISK_SPACE_GB", 20)
 SAVE_INVALID_FILES: bool = os.getenv("SAVE_INVALID_FILES", "false") == "true"
-MAX_IMAGES: int = int(os.getenv("MAX_IMAGES", "3"))
+MAX_IMAGES: int = _safe_int_env("MAX_IMAGES", 3)
 
-# Allowed file types
+
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".bmp", ".png", ".pdf"}
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
-MIN_FILE_SIZE = 1024  # 1KB
+MAX_FILE_SIZE = 10 * 1024 * 1024
+MIN_FILE_SIZE = 1024
+
+
+
+async def _vllm_request(url: str, payload: dict, retries: int = VLLM_MAX_RETRIES) -> Optional[dict]:
+    if _http_client is None:
+        logger.error("_vllm_request called before startup")
+        return None
+    last_exc = None
+    for attempt in range(retries + 1):
+        try:
+            response = await _http_client.post(url, json=payload)
+            if response.status_code == 200:
+                return response.json()
+            if response.status_code in {429, 502, 503, 504} and attempt < retries:
+                wait = 1.5 ** (attempt + 1)
+                logger.warning(f"vLLM returned {response.status_code}, retry {attempt + 1}/{retries} in {wait:.1f}s")
+                await asyncio.sleep(wait)
+                continue
+            logger.error(f"vLLM request failed: {response.status_code} - {response.text[:300]}")
+            return None
+        except (httpx.TimeoutException, httpx.RequestError) as e:
+            last_exc = e
+            if attempt < retries:
+                wait = 1.5 ** (attempt + 1)
+                logger.warning(f"vLLM request error (attempt {attempt + 1}/{retries}): {e}, retry in {wait:.1f}s")
+                await asyncio.sleep(wait)
+                continue
+            logger.error(f"vLLM request failed after {retries + 1} attempts: {last_exc}")
+            return None
+    return None
+
+
+class DocParserException(Exception):
+    def __init__(self, status_code: int, error: str, task_id: str):
+        self.status_code = status_code
+        self.error = error
+        self.taskId = task_id
+
 
 
 class Base64FileRequest(BaseModel):
@@ -118,45 +249,52 @@ def get_file_extension(filename: str) -> str:
 
 
 def save_uploaded_file(file: UploadFile, filename: str):
-    """Save uploaded file with unique name"""
-    
+    """Save uploaded file with unique name. Returns True on success."""
     try:
         disk_usage = shutil.disk_usage(INVALID_DIR)
-        available_space_gb = disk_usage.free / (1024 ** 3)  # Convert bytes to GB
-        
-        if available_space_gb < 20:
-            error_msg = f"Insufficient storage space: {available_space_gb:.2f}GB available (minimum 5GB required)"
-            logger.error(f"Failed to save file {filename}: {error_msg}", exc_info=True)
-            return
+        available_space_gb = disk_usage.free / (1024 ** 3)
+
+        if available_space_gb < MIN_DISK_SPACE_GB:
+            error_msg = f"Insufficient storage space: {available_space_gb:.2f}GB available (minimum {MIN_DISK_SPACE_GB}GB required)"
+            logger.error(f"Failed to save file {filename}: {error_msg}")
+            return False
 
         file.file.seek(0)
         file_path = INVALID_DIR / filename
         with open(file_path, "wb") as buffer:
-          buffer.write(file.file.read())
+            buffer.write(file.file.read())
+
+        return True
 
     except Exception as e:
         logger.error(f"Failed to save file {filename}: {str(e)}", exc_info=True)
+        return False
 
-    remove_files_older_than(INVALID_DIR)
 
-
-def remove_files_older_than(directory, days=30):
-    
+def _cleanup_old_files(directory: Path, days: int = 30):
     try:
         cutoff_time = time.time() - (days * 24 * 60 * 60)
-
         for filename in os.listdir(directory):
             filepath = os.path.join(directory, filename)
-
             if os.path.isfile(filepath):
                 file_mod_time = os.path.getmtime(filepath)
-
                 if file_mod_time < cutoff_time:
                     os.remove(filepath)
-                    logger.info(f"Removed: {filepath}")
-                    
+                    logger.info(f"Removed old file: {filepath}")
     except Exception as e:
-        logger.error(f"Failed to clean invalid files: {str(e)}", exc_info=True)
+        logger.error(f"Failed to clean old files: {str(e)}", exc_info=True)
+
+
+async def _periodic_cleanup():
+    """Background task that cleans up old files every hour."""
+    while True:
+        await asyncio.sleep(3600)
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _cleanup_old_files, INVALID_DIR)
+            await loop.run_in_executor(None, _cleanup_old_files, ERROR_DIR)
+        except Exception as e:
+            logger.error(f"Periodic cleanup failed: {e}")
 
 
 def preprocess_document_image(image, min_short_side=1200, max_long_side=1600):
@@ -241,16 +379,6 @@ def pdf_to_images(file: UploadFile, max_pages: int = None) -> List[str]:
 
 
 
-VALID_BANKING_FIELDS = {
-    "name", "bankAccountNumber", "iban", "branch", "date", "bic"
-}
-VALID_IDENTITY_FIELDS = {
-    "personalNumber", "nationality", "name", "nameAr", "dateOfBirth", "expiryDate", "gender"
-}
-ACCEPTED_DOCUMENT_TYPES = [
-    "passport", "identity_card", "driver_license"
-]
-
 def _normalize_string(value) -> Optional[str]:
     """Strip stray quotes/whitespace and reject non-meaningful values."""
     if isinstance(value, str):
@@ -316,29 +444,71 @@ def _normalize_iban(value) -> Optional[str]:
     iban = "".join(ch for ch in str(value) if ch.isalnum())
     return iban if len(iban) >= 20 else None
 
-def _normalize_field(field: str, value):
-    """Apply field-specific normalization/corrections."""
-    if field in {"date", "dateOfBirth", "expiryDate"}:
+def _normalize_number(value) -> Optional[str]:
+    raw = _normalize_string(value)
+    if raw is None:
+        return None
+    try:
+        if "." in raw:
+            float(raw)
+        else:
+            int(raw)
+        return raw
+    except (ValueError, TypeError):
+        return None
+
+
+def _normalize_field(field: str, value, field_type: str = None):
+    if field_type == "date":
         return _normalize_date(value)
     if field == "gender":
         return _normalize_gender(value)
     if field == "iban":
         return _normalize_iban(value)
+    if field_type == "number":
+        return _normalize_number(value)
     return _normalize_string(value)
 
 
-def _clean_section(section, valid_fields):
-    """Validate a section dict and keep only known, meaningful fields."""
+def _clean_section(section, schema):
     if not isinstance(section, dict):
         return None
 
     cleaned = {}
     for field, value in section.items():
-        if field not in valid_fields:
+        if field not in schema:
             continue
-        normalized = _normalize_field(field, value)
-        if normalized is not None:
-            cleaned[field] = normalized
+
+        field_schema = schema[field]
+
+        if isinstance(field_schema, list):
+            if not isinstance(value, list):
+                continue
+            if not field_schema:
+                continue
+            item_schema = field_schema[0]
+            if not isinstance(item_schema, dict):
+                continue
+            cleaned_items = []
+            for item in value:
+                cleaned_item = _clean_section(item, item_schema)
+                if cleaned_item is not None:
+                    cleaned_items.append(cleaned_item)
+            if cleaned_items:
+                cleaned[field] = cleaned_items
+
+        elif isinstance(field_schema, dict):
+            if not isinstance(value, dict):
+                continue
+            cleaned_obj = _clean_section(value, field_schema)
+            if cleaned_obj is not None:
+                cleaned[field] = cleaned_obj
+
+        else:
+            field_type = field_schema if isinstance(field_schema, str) else None
+            normalized = _normalize_field(field, value, field_type)
+            if normalized is not None:
+                cleaned[field] = normalized
 
     return cleaned if cleaned else None
 
@@ -389,14 +559,8 @@ def extract_json_content(content: str) -> str:
     return cleaned
 
 
-def parse_data(response: dict) -> dict:
-    '''
-    Validates that `response` conforms to the expected JSON schema and
-    applies corrections where possible (field names, date formats, gender
-    casing, stray markdown/quotes). Returns a cleaned dict, or None if the
-    input is not a valid document structure.
-    '''
-
+def parse_data(response: dict, schema: dict) -> dict:
+ 
     if response is None or not isinstance(response, dict):
         logger.warning("parse_data: response is not a dict, returning None")
         return None
@@ -404,134 +568,176 @@ def parse_data(response: dict) -> dict:
     # The LLM may return a sentinel string indicating a rejected document
     if isinstance(response, dict) and set(response.keys()) <= {"other"}:
         return None
+ 
+    return _clean_section(response, schema)
 
-    documentType = response.get('documentType')
-    validDocumentType = documentType in ACCEPTED_DOCUMENT_TYPES
 
-    banking = _clean_section(response.get("bankingData"), VALID_BANKING_FIELDS)
-    identity = _clean_section(response.get("identityData"), VALID_IDENTITY_FIELDS)
 
-    if validDocumentType and identity is not None:
-        identity["documentType"] = documentType
+async def classify_images(images: List[str]) -> List[dict]:
 
-    if identity is not None and not identity.get("personalNumber"):
-        logger.info("parse_data: identityData dropped, missing personalNumber")
-        identity = None
+    doc_types_list = "\n".join(f"    - {d}" for d in supported_documents)
+    user_prompt = (prompt_config.get('classification') or "").replace("{{listPlaceholder}}", doc_types_list)
+    sys_prompt = prompt_config.get('classification_system') or ""
 
-    if banking is not None and not banking.get("iban"):
-        logger.info("parse_data: bankingData dropped, missing iban")
-        banking = None
+    semaphore = asyncio.Semaphore(CLASSIFICATION_CONCURRENCY)
 
-    if banking is None and identity is None:
+    async def _classify_one(index: int, img: str) -> dict:
+        async with semaphore:
+            messages = [
+                {"role": "system", "content": [{"type": "text", "text": sys_prompt}]},
+                {"role": "user", "content": [
+                    {"type": "text", "text": user_prompt},
+                    {"type": "image_url", "image_url": {"url": img}}
+                ]}
+            ]
+            payload = {"messages": messages, "temperature": 0.0}
+
+            try:
+                result = await _vllm_request(CLASSIFIER_URL, payload)
+                if result is None:
+                    logger.error(f"Classification failed page {index}")
+                    return {"pageIndex": index, "imageType": "unknown", "confidence": 0.0}
+
+                content = result["choices"][0]["message"]["content"]
+                parsed = json.loads(extract_json_content(content))
+
+                return {
+                    "pageIndex": index,
+                    "imageType": parsed.get("imageType", "unknown"),
+                    "confidence": parsed.get("confidence", 0.0)
+                }
+            except Exception as e:
+                logger.error(f"Classification error page {index}: {str(e)}")
+                return {"pageIndex": index, "imageType": "unknown", "confidence": 0.0}
+
+    tasks = [_classify_one(i, img) for i, img in enumerate(images)]
+    results = await asyncio.gather(*tasks)
+
+    return sorted(results, key=lambda x: x["pageIndex"])
+
+
+def group_pages(classifications: List[dict]) -> List[dict]:
+
+    if not classifications:
+        return []
+
+    supported_set = set(supported_documents)
+
+    has_supported = any(c.get("imageType") in supported_set for c in classifications)
+    if not has_supported:
+        return []
+
+    filled = []
+    last_supported = None
+    for c in classifications:
+        t = c.get("imageType")
+        if t in supported_set:
+            last_supported = t
+        filled.append(last_supported)
+
+    if filled[0] is None:
+        first_supported = next((f for f in filled if f is not None), None)
+        if first_supported:
+            filled = [first_supported if f is None else f for f in filled]
+
+    groups = []
+    current_type = filled[0]
+    start = 0
+    for i in range(1, len(filled)):
+        if filled[i] != current_type:
+            groups.append({"imageType": current_type, "pageIndices": list(range(start, i))})
+            current_type = filled[i]
+            start = i
+    groups.append({"imageType": current_type, "pageIndices": list(range(start, len(filled)))})
+    return groups
+
+
+async def extract_content(images: List[str], doc_type: str) -> dict:
+
+    schema = document_schemas.get(doc_type, {})
+    sys_prompt = prompt_config.get('extraction_system') or ""
+    user_prompt = (prompt_config.get('extraction') or "").replace("{{jsonPlaceholder}}", json.dumps(schema, indent=2))
+
+    messages = [
+        {"role": "system", "content": [{"type": "text", "text": sys_prompt}]},
+        {"role": "user", "content": [
+            {"type": "text", "text": f"The document type is: {doc_type}\n\n{user_prompt}"},
+            *[{"type": "image_url", "image_url": {"url": img}} for img in images]
+        ]}
+    ]
+
+    payload = {"messages": messages, "temperature": 0.0}
+
+    result = await _vllm_request(EXTRACTOR_URL, payload)
+
+    if result is None:
+        logger.error(f"Extraction failed for {doc_type} after retries")
         return None
 
-    return {
-        **({"bankingData": banking} if banking else {}),
-        **({"identityData": identity} if identity else {}),
-    }
+    content = result["choices"][0]["message"]["content"]
+    try:
+        json_data = json.loads(extract_json_content(content))
+        return parse_data(json_data, schema)
+    except (json.JSONDecodeError, ValueError, TypeError):
+        logger.error(f"Extraction JSON parse failed for {doc_type}: {content}")
+        return None
 
 
-
-async def analyze_images(images: List[str]) -> dict:
+async def analyze_images(images: List[str]) -> list:
 
     try:
-        image_contents = []
-        for img in images:
-            image_contents.append({
-                "type": "image_url",
-                "image_url": {
-                    "url": img
-                }
-            })
-        
-        prompt = prompt_config['identification']
+        classifications = await classify_images(images) if CLASSIFIER_URL else []
+        groups = group_pages(classifications) if CLASSIFIER_URL else []
 
-        messages = [
-            {
-                "role": "system",
-                "content": [
-                    {
-                        "type": "text", 
-                        "text": prompt_config["system"]
-                    }
-                ]
-            },
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": prompt
-                    },
-                    *image_contents
-                ]
+        if not CLASSIFIER_URL or len(groups) == 0:
+            logger.info(f"Classifier {'skipped' if not CLASSIFIER_URL else 'no groups formed'}, extracting all pages as single group")
+            groups = [{"imageType": "unknown", "pageIndices": list(range(len(images)))}]
+
+        async def _extract_one(group: dict) -> Optional[dict]:
+            group_images = [images[i] for i in group["pageIndices"]]
+
+            group_conf = [
+                c["confidence"] for c in classifications
+                if c["pageIndex"] in group["pageIndices"]
+            ]
+            confidence = max(group_conf) if group_conf else 0.0
+
+            data = await extract_content(group_images, group["imageType"])
+
+            return {
+                "documentType": group["imageType"],
+                "confidence": confidence,
+                "data": data
             }
+
+        extraction_tasks = [_extract_one(g) for g in groups]
+        extraction_results = await asyncio.gather(*extraction_tasks, return_exceptions=True)
+        results = [
+            r for r in extraction_results
+            if isinstance(r, dict) and r.get("data") is not None
         ]
-        
 
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
-        
-        payload = {
-            "messages": messages,
-            "temperature": 0.0
-        }
-        
-        async with httpx.AsyncClient(timeout=VLLM_TIMEOUT) as client:
-            response = await client.post(
-                VLLM_URL,
-                headers=headers,
-                json=payload
-            )
-            
-            if response.status_code != 200:
-                logger.error(f"Failed to process file. API error: {response.status_code} - {response.text}")
-                raise HTTPException(status_code=500, detail="Failed to process file")
-            
-            result = response.json()
-            
-            content = result["choices"][0]["message"]["content"]
-            jsonData = None
-            try:
-                jsonData = json.loads(extract_json_content(content))
-            except (json.JSONDecodeError, ValueError, TypeError):
-                logger.error("Failed to process file. LLM output is not valid JSON.")
+        return results
 
-            response = parse_data(jsonData)
-            if response is None:
-                logger.error(f"Failed to extract data. {content}")
-
-            return response
-            
     except httpx.TimeoutException:
-        logger.error("Failed to process file. Request timed out.")
-        raise HTTPException(status_code=504, detail="Failed to process file. Request timed out.")
+        logger.error("Request timed out during analysis.")
+        raise HTTPException(status_code=504, detail="Request timed out.")
     except httpx.RequestError as e:
-        logger.error(f"Failed to process file.API request failed: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to process file.")
+        logger.error(f"API request failed: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="API request failed.")
     except DocParserException as e:
         raise e
     except Exception as e:
-        logger.error(f"Failed to process file.Error calling API: {str(e)}", exc_info=True)
+        logger.error(f"Error in analyze_images: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to process file.")
-
-
-def avg_processing_time():
-    global process_time_history
-
-    total = len(process_time_history)
-    avg = 0
-    if total == 0:
-        return total, avg
-
-    avg = sum(process_time_history) / total
-    return total, avg
 
 
 def make_file_id(file) -> str:
     return f"{file.filename}:{file.size}"
+
+
+def contains_file(request: Base64FileRequest) -> bool:
+    return request.content is not None and request.filename is not None and len(request.content) > 0 and len(request.filename) > 0
 
 
 def decode_base64_file(request: Base64FileRequest) -> UploadFile:
@@ -604,27 +810,30 @@ async def process_file(
     request: Request,
     file: Optional[UploadFile] = File(None),
 ):
-    global request_count, invalid_count, valid_count, process_time_history, error_count, invalid_list
 
     task_uuid = str(uuid.uuid4())
     start_time = time.perf_counter()
 
     try:
-        # Handle base64 input from JSON body
+
+        content_type = request.headers.get("content-type", "")
+        if "application/json" in content_type:
+            try:
+                body = await request.json()
+                req = Base64FileRequest(**body)
+                if contains_file(req):
+                    file = decode_base64_file(req)
+            except HTTPException:
+                raise
+            except Exception:
+                raise HTTPException(status_code=400, detail="Invalid base64 request body")
+
+
         if file is None:
-            content_type = request.headers.get("content-type", "")
-            if "application/json" in content_type:
-                try:
-                    body = await request.json()
-                    base64_request = Base64FileRequest(**body)
-                    file = decode_base64_file(base64_request)
-                except Exception:
-                    raise HTTPException(status_code=400, detail="Invalid base64 request body")
-            else:
-                raise HTTPException(status_code=400, detail="Provide either file (multipart) or base64_request (JSON)")
+            raise HTTPException(status_code=400, detail="Provide either file (multipart) or base64 request (JSON)")
 
         file_id = make_file_id(file)
-        request_count += 1
+        await stats.inc_request()
         if not validate_file_size(file):
             raise HTTPException(status_code=400, detail=f"Invalid file size. The file size must be between {MIN_FILE_SIZE / 1024} KB and {MAX_FILE_SIZE / (1024*1024)} MB.")
     
@@ -659,41 +868,36 @@ async def process_file(
 
 
         vllm_result = await analyze_images(images_to_analyze)
-        if vllm_result is None:
-            if file_id not in invalid_list:
-                invalid_list.append(file_id)
-                invalid_count += 1
-
-                if SAVE_INVALID_FILES:
-                    save_uploaded_file(file, f"{task_uuid}{file_ext}")
+        if len(vllm_result) == 0:
+            await stats.inc_invalid(file_id)
+            if SAVE_INVALID_FILES:
+                save_uploaded_file(file, f"{task_uuid}{file_ext}")
         else:
-            valid_count += 1
+            await stats.inc_valid()
 
 
         end_time = time.perf_counter()
         processing_time = end_time - start_time
-        if len(process_time_history) > 1000: #keep last 1000 requests
-            process_time_history.pop(0)
-        process_time_history.append(processing_time)
+        await stats.record_time(processing_time)
 
 
         return JSONResponse(content={
-            "success": vllm_result is not None,
+            "success": len(vllm_result) > 0,
             "result": vllm_result
         })
 
     except HTTPException as er:
-        error_count += 1
+        await stats.inc_error()
         logger.error(f"[Task: {task_uuid}]. Error processing file: {str(er)}", exc_info=True)
         raise DocParserException(status_code=er.status_code, error=str(er.detail), task_id=task_uuid)
     
     except DocParserException as er:
-        error_count += 1
+        await stats.inc_error()
         logger.error(f"[Task: {task_uuid}]. Error processing file: {str(er)}", exc_info=True)
         raise er
 
     except Exception as e:
-        error_count += 1
+        await stats.inc_error()
         logger.error(f"[Task: {task_uuid}]. Error processing file: {str(e)}", exc_info=True)
         raise DocParserException(status_code=500, error="Failed to process file", task_id=task_uuid)
 
@@ -701,17 +905,35 @@ async def process_file(
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
-    total, avg = avg_processing_time()
+    """Health check endpoint with vLLM connectivity probe."""
+    snapshot = await stats.snapshot()
+
+    vllm_status = {}
+    for name, url in [("classifier", CLASSIFIER_URL), ("extractor", EXTRACTOR_URL)]:
+        if not url:
+            vllm_status[name] = "not configured"
+            continue
+        try:
+            base = url.rsplit("/v1", 1)[0] if "/v1" in url else url.rsplit("/", 1)[0]
+            resp = await _http_client.get(f"{base}/health", timeout=5.0)
+            vllm_status[name] = "healthy" if resp.status_code == 200 else f"unhealthy ({resp.status_code})"
+        except Exception:
+            vllm_status[name] = "unreachable"
+
+    overall = "healthy"
+    if any(v == "unreachable" for v in vllm_status.values()):
+        overall = "degraded"
+
     return {
-        "status": "healthy",
-        "accepted": ".jpg, .jpeg, .png, .bmp, .pdf",
-        "requests": request_count,
-        "valid": valid_count,
-        "invalid": invalid_count,
-        "errors": error_count,
+        "status": overall,
+        "accepted": ALLOWED_EXTENSIONS,
+        "requests": snapshot["requests"],
+        "valid": snapshot["valid"],
+        "invalid": snapshot["invalid"],
+        "errors": snapshot["errors"],
         "max_file_size_mb": MAX_FILE_SIZE / (1024 * 1024),
-        "avg_process_time": avg
+        "avg_process_time": snapshot["avg_process_time"],
+        "engine": vllm_status,
     }
 
 if __name__ == "__main__":

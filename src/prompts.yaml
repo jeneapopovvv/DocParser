@@ -1,77 +1,38 @@
 
 
-system: |
-    You are a reliable document classification and extraction engine. Your sole purpose is to analyze the provided image, clasify and extract information if its . Your entire response must be a single, valid JSON object, and you must include **no other text, explanations, or conversational filler**.
+classification_system: |
+    You are a reliable document classification engine. Your sole purpose is to analyze the provided image and clasify its content. Your entire response must be a single, valid JSON object, and you must include **no other text, explanations, or conversational filler**.
+
+classification: |
+    Analyze the provided image and return a STRICT JSON if the following document types are detected:
+    - unknown
+    {{listPlaceholder}}
+
+    **Output format MUST be**:
+    {
+        "imageType": "string",
+        "confidence": "number"
+    }
 
 
-identification: |
-    Analyze the provided image and return a STRICT JSON response with NO additional text. Follow these rules:
+
+
+extraction_system: |
+    You are a reliable document extraction engine. Your sole purpose is to analyze the provided image and extract information. Your entire response must be a single, valid JSON object, and you must include **no other text, explanations, or conversational filler**.
+
+
+extraction: |
+    Analyze the provided images and return a STRICT JSON response with NO additional text. Follow these rules:
     
-    1. **Document Type Detection** (mandatory):
-       - Identify the document as EXACTLY one of:
-         "passport", "identity_card", "driver_license" or "other"
-       - If uncertain, default to "other"
-    
-    2. **Data Extraction** (only include fields present in the document):
-       - For **passport**:
-          {
-            "personalNumber": "Passport number (exactly as printed)",
-            "nationality": "Nationality",
-            "name": "Full name (in english)",
-            "nameAr": "Full name **MUST BE STRICTLY IN ARABIC**",
-            "dateOfBirth": "Date of birth in format DD/MM/YYYY",
-            "expiryDate": "Expiry date in format DD/MM/YYYY",
-            "gender": "Gender (M/F)"
-          }
-       - For **identity_card**:
-          {
-            "personalNumber": "Personal number (exactly as printed)",
-            "nationality": "Nationality",
-            "name": "Full name (in english)",
-            "nameAr": "Full name **MUST BE STRICTLY IN ARABIC**",
-            "dateOfBirth": "Date of birth in format DD/MM/YYYY",
-            "expiryDate": "Expiry date in format DD/MM/YYYY",
-            "gender": "Gender (M/F)"
-          }
-       - For **driver_license**:
-         {
-            "personalNumber": "License number (exactly as printed)",
-            "nationality": "Nationality",
-            "name": "Full name (in english)",
-            "nameAr": "Full name **MUST BE STRICTLY IN ARABIC**",
-            "dateOfBirth": "Date of birth in format DD/MM/YYYY",
-            "gender": "Gender (M/F)"
-          }
-       - For **other**:
-         {
-           "documentDescription": "1-sentence description of document type"
-         }
-    
-    3. **Critical Rules**:
+    1. **Critical Rules**:
        - ONLY return the JSON object (no markdown, no explanations)
        - Omit any field not visible in the image
-       - Use NULL for missing required dates (e.g., "dateOfBirth": null)
        - Format all dates as "DD/MM/YYYY"
-       - If no valid document is found, return:
-         {"documentType": "other", "identityData": {"documentDescription": "No valid ID document detected"}}
-    
-    4. **Validation**:
-       - Reject forged/obscured documents by returning "other"
+       - Format gender as "M" or "F"
+
+    2. **Validation**:
        - Never invent data - if information is unreadable, omit the field
     
-    5. **Banking Data Extraction** (only include fields present in the document):
-       - "bankingData" field must contain banking attributes
 
-    Output format MUST be:
-    {
-      "documentType": "string",
-      "identityData": { ... },
-      "bankingData": {
-        "name": "Customer name (exactly as printed)",
-        "bankAccountNumber": "A/c No.",
-        "iban": "IBAN code (exactly as printed)",
-        "branch": "Bank branch",
-        "date": "Date in format DD/MM/YYYY",
-        "bic": "Alphanumeric BIC/SWIFT code"
-      }
-    }
+    **Output format MUST be**:
+    {{jsonPlaceholder}}
