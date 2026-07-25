@@ -10,7 +10,7 @@ services:
       - VLLM_TIMEOUT=60 #seconds
       - EXTRACTOR_URL=http://extractor:8000/v1/chat/completions
       - CLASSIFIER_URL=http://classifier:8000/v1/chat/completions
-      - LOG_LEVEL=DEBUG
+      - LOG_LEVEL=INFO
       - SAVE_INVALID_FILES=false
       - MAX_IMAGES=3
     healthcheck:
