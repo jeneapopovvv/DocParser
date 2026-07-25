@@ -5,7 +5,7 @@ services:
     build: ./src 
     container_name: doc_parser_server
     ports:
-      - "6060:6060" 
+      - "6060:6060"
     environment:
       - VLLM_TIMEOUT=60 #seconds
       - EXTRACTOR_URL=http://extractor:8000/v1/chat/completions
@@ -31,9 +31,11 @@ services:
   extractor:
     image: vllm/vllm-openai:v0.25.1-cu129-ubuntu2404
     container_name: doc_parser_extractor
+    ports:
+      - "6063:8000"
     command: >
       --model=Qwen/Qwen3.5-2B
-      --gpu-memory-utilization=0.35
+      --gpu-memory-utilization=0.45
       --max-num-seqs=5
       --max-model-len=6098
       --dtype=half
