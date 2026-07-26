@@ -517,6 +517,41 @@ def _clean_section(section, schema):
     return cleaned if cleaned else None
 
 
+def _sanitize_json_string_content(content: str) -> str:
+    """Remove control characters from JSON string values to keep the payload serializable."""
+    if not isinstance(content, str):
+        return ""
+
+    result: List[str] = []
+    in_string = False
+    escaped = False
+
+    for ch in content:
+        if in_string:
+            if escaped:
+                result.append(ch)
+                escaped = False
+                continue
+            if ch == "\\":
+                result.append(ch)
+                escaped = True
+                continue
+            if ch == '"':
+                result.append(ch)
+                in_string = False
+                continue
+            if ch == "'" or ord(ch) < 32 or ord(ch) == 127:
+                continue
+            result.append(ch)
+            continue
+
+        if ch == '"':
+            in_string = True
+        result.append(ch)
+
+    return "".join(result)
+
+
 def extract_json_content(content: str) -> str:
     """Strip markdown fences and recover a JSON object/array substring.
 
@@ -558,9 +593,9 @@ def extract_json_content(content: str) -> str:
             elif ch == close_ch:
                 depth -= 1
                 if depth == 0:
-                    return cleaned[start:i + 1]
+                    return _sanitize_json_string_content(cleaned[start:i + 1])
 
-    return cleaned
+    return _sanitize_json_string_content(cleaned)
 
 
 def parse_data(response: dict, schema: dict) -> dict:
@@ -629,7 +664,7 @@ async def classify_images(images: List[str], supported_documents_override: Optio
                     return {"pageIndex": index, "documentType": "unknown", "confidence": 0.0}
 
                 content = result["choices"][0]["message"]["content"]
-                parsed = json.loads(content)
+                parsed = json.loads(extract_json_content(content))
 
                 document_type = parsed.get("documentType", "unknown") or "unknown"
                 return {
@@ -759,7 +794,7 @@ async def extract_content(
     logger.debug(f"Extraction result for {doc_type}: {content}")
 
     try:
-        json_data = json.loads(content)
+        json_data = json.loads(extract_json_content(content))
         return parse_data(json_data, schema)
     except (json.JSONDecodeError, ValueError, TypeError):
         logger.error(f"Extraction JSON parse failed for {doc_type}: {content}", exc_info=True)
