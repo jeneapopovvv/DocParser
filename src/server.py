@@ -629,7 +629,7 @@ async def classify_images(images: List[str], supported_documents_override: Optio
                     return {"pageIndex": index, "documentType": "unknown", "confidence": 0.0}
 
                 content = result["choices"][0]["message"]["content"]
-                parsed = json.loads(extract_json_content(content))
+                parsed = json.loads(content)
 
                 document_type = parsed.get("documentType", "unknown") or "unknown"
                 return {
@@ -759,7 +759,7 @@ async def extract_content(
     logger.debug(f"Extraction result for {doc_type}: {content}")
 
     try:
-        json_data = json.loads(extract_json_content(content))
+        json_data = json.loads(content)
         return parse_data(json_data, schema)
     except (json.JSONDecodeError, ValueError, TypeError):
         logger.error(f"Extraction JSON parse failed for {doc_type}: {content}", exc_info=True)
