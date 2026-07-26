@@ -1,7 +1,7 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List, Optional, Union
+from typing import List, Optional
 import os
 import uuid
 from pathlib import Path
@@ -10,14 +10,10 @@ import pdf2image
 import logging
 import base64
 import httpx
-from datetime import datetime, timezone
+from datetime import datetime
 from io import BytesIO
 import time
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
-from slowapi.errors import RateLimitExceeded
 from pydantic import BaseModel, Field
-from enum import Enum
 import json
 import re
 import yaml
@@ -575,7 +571,10 @@ def parse_data(response: dict, schema: dict) -> dict:
 
 async def classify_images(images: List[str]) -> List[dict]:
 
-    doc_types_list = "\n".join(f"- {d}" for d in supported_documents)
+    doc_types_list = "\n".join(
+        f"| {doc_id} | {description} |"
+        for doc_id, description in supported_documents.items()
+    )
     user_prompt = prompt_config.get('classification', "").replace("{{listPlaceholder}}", doc_types_list)
     sys_prompt = prompt_config.get('classification_system', "")
 
@@ -593,29 +592,28 @@ async def classify_images(images: List[str]) -> List[dict]:
 
             payload = {
                 "messages": messages, 
-                "temperature": 0.6,
-                "top_p": 0.8,
-                "top_k": 20,
-                "chat_template_kwargs": {"enable_thinking": True},
+                "temperature": 0.0
             }
 
             try:
                 result = await _vllm_request(CLASSIFIER_URL, payload)
                 if result is None:
                     logger.error(f"Classification failed page {index}")
-                    return {"pageIndex": index, "imageType": "unknown", "confidence": 0.0}
+                    return {"pageIndex": index, "documentType": "unknown", "confidence": 0.0}
 
                 content = result["choices"][0]["message"]["content"]
                 parsed = json.loads(extract_json_content(content))
 
+                document_type = parsed.get("documentType", "unknown") or "unknown"
                 return {
                     "pageIndex": index,
-                    "imageType": parsed.get("imageType", "unknown"),
-                    "confidence": parsed.get("confidence", 0.0)
+                    "documentType": document_type,
+                    "confidence": parsed.get("confidence", 0.0),
+                    "reasoning": parsed.get("reasoning", "")
                 }
             except Exception as e:
                 logger.error(f"Classification error page {index}: {str(e)}")
-                return {"pageIndex": index, "imageType": "unknown", "confidence": 0.0}
+                return {"pageIndex": index, "documentType": "unknown", "confidence": 0.0}
 
     tasks = [_classify_one(i, img) for i, img in enumerate(images)]
     results = await asyncio.gather(*tasks)
@@ -628,40 +626,67 @@ async def classify_images(images: List[str]) -> List[dict]:
     return sorted(results, key=lambda x: x["pageIndex"])
 
 
-def group_pages(classifications: List[dict]) -> List[dict]:
+def group_pages(
+    classifications: List[dict],
+    confidence_threshold: float = 0.0,
+    max_noise_pages: int = 2,
+) -> List[dict]:
 
     if not classifications:
         return []
 
-    supported_set = set(supported_documents)
+    supported_set = set(supported_documents().keys())
+    groups: List[dict] = []
+    current_type: Optional[str] = None
+    current_indices: List[int] = []
+    pending_noise_indices: List[int] = []
+    noise_run = 0
+    seen_supported = False
 
-    has_supported = any(c.get("imageType") in supported_set for c in classifications)
-    if not has_supported:
-        return []
+    def flush_current_group() -> None:
+        nonlocal current_type, current_indices, pending_noise_indices, noise_run
+        if current_type is not None:
+            groups.append({"documentType": current_type, "pageIndices": current_indices[:]})
+        current_type = None
+        current_indices = []
+        pending_noise_indices = []
+        noise_run = 0
 
-    filled = []
-    last_supported = None
-    for c in classifications:
-        t = c.get("imageType")
-        if t in supported_set:
-            last_supported = t
-        filled.append(last_supported)
+    for index, classification in enumerate(classifications):
+        image_type = classification.get("documentType", "unknown") or "unknown"
+        confidence = float(classification.get("confidence", 0.0) or 0.0)
+        is_supported = image_type in supported_set and confidence >= confidence_threshold
 
-    if filled[0] is None:
-        first_supported = next((f for f in filled if f is not None), None)
-        if first_supported:
-            filled = [first_supported if f is None else f for f in filled]
+        if is_supported:
+            if current_type is None:
+                current_type = image_type
+                current_indices = pending_noise_indices + [index]
+                pending_noise_indices = []
+                seen_supported = True
+            elif current_type == image_type:
+                current_indices.append(index)
+            else:
+                flush_current_group()
+                current_type = image_type
+                current_indices = [index]
+                seen_supported = True
+            noise_run = 0
+            continue
 
-    groups = []
-    current_type = filled[0]
-    start = 0
-    for i in range(1, len(filled)):
-        if filled[i] != current_type:
-            groups.append({"imageType": current_type, "pageIndices": list(range(start, i))})
-            current_type = filled[i]
-            start = i
-    groups.append({"imageType": current_type, "pageIndices": list(range(start, len(filled)))})
-    return groups
+        if current_type is None:
+            pending_noise_indices.append(index)
+            continue
+
+        if noise_run < max_noise_pages:
+            current_indices.append(index)
+            noise_run += 1
+        else:
+            flush_current_group()
+
+    if current_type is not None:
+        groups.append({"documentType": current_type, "pageIndices": current_indices[:]})
+
+    return groups if seen_supported else []
 
 
 async def extract_content(images: List[str], doc_type: str) -> dict:
@@ -715,7 +740,7 @@ async def analyze_images(images: List[str]) -> list:
 
         if not CLASSIFIER_URL or len(groups) == 0:
             logger.info(f"Classifier {'skipped' if not CLASSIFIER_URL else 'no groups formed'}, extracting all pages as single group")
-            groups = [{"imageType": "unknown", "pageIndices": list(range(len(images)))}]
+            groups = [{"documentType": "unknown", "pageIndices": list(range(len(images)))}]
 
         async def _extract_one(group: dict) -> Optional[dict]:
             group_images = [images[i] for i in group["pageIndices"]]
@@ -726,10 +751,11 @@ async def analyze_images(images: List[str]) -> list:
             ]
             confidence = max(group_conf) if group_conf else 0.0
 
-            data = await extract_content(group_images, group["imageType"])
+            document_type = group.get("documentType", "unknown") or "unknown"
+            data = await extract_content(group_images, document_type)
 
             return {
-                "documentType": group["imageType"],
+                "documentType": document_type,
                 "confidence": confidence,
                 "data": data
             }

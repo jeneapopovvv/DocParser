@@ -1,14 +1,14 @@
 
 
-supported_documents = [
-    "passport",
-    "identity_card",
-    "driver_license",
-    "iban",
-    "lease_agreement",
-    "commercial_registration_certificate",
-]
 
+supported_documents = {
+    "passport":         "Passport",
+    "identity_card":    "Government ID",
+    "driver_license":   "Driver license",
+    "iban":             "Financial account statements from banking institutions",
+    "lease_agreement":  "Lease agreement contract between landlord and tenant",
+    "cr_certificate":   "Commercial Registration Certificate issued by the government",
+}
 
 document_schemas = {
     "passport": {
@@ -63,7 +63,7 @@ document_schemas = {
         "leaseStartDate": "date",
         "leaseEndDate": "date"
     },
-    "commercial_registration_certificate": {
+    "cr_certificate": {
         "registrationNumber": "string",
         "commercialName": "string",
         "commercialNameArabic": "string",

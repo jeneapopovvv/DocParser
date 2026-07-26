@@ -1,24 +1,38 @@
 
 
 classification_system: |
-    You are a reliable document classification engine. Your sole purpose is to analyze the provided image and clasify its content. Your entire response must be a single, valid JSON object, and you must include **no other text, explanations, or conversational filler**.
+    You are a precise document classification engine. Your sole task is to analyze the provided document and classify it into exactly ONE document type.
+
 
 classification: |
-    Analyze the provided image and return a STRICT JSON if the following document types are detected:
-    - unknown
-    {{listPlaceholder}}
+    ## ALLOWED DOCUMENT TYPES
+    You MUST classify the document into one of the following categories. Do NOT invent new types.
 
-    **Output format MUST be**:
+    | Type | Description |
+    |------|-------------|
+    {{listPlaceholder}}
+    | unknown | Use ONLY when the document does not fit any category above |
+
+    ## CLASSIFICATION RULES
+    1. Analyze the document's structure, language, keywords, headers, and intent.
+    2. If the document fits multiple types, choose the PRIMARY purpose.
+    3. If the document is too short or unreadable, classify as "unknown".
+    4. Confidence must be a float between 0.0 and 1.0.
+
+    ## OUTPUT FORMAT
+    You MUST respond with ONLY a valid JSON object. No markdown. No explanation. No preamble. No trailing text.
+
     {
-        "imageType": "string",
-        "confidence": "number"
+        "documentType": "<one of the allowed types>",
+        "confidence": <0.0 to 1.0>,
+        "reasoning": "<one concise sentence explaining the classification>"
     }
 
 
 
 
 extraction_system: |
-    You are a reliable document extraction engine. Your sole purpose is to analyze the provided image and extract information. Your entire response must be a single, valid JSON object, and you must include **no other text, explanations, or conversational filler**.
+    You are a precise document extraction engine. Your sole purpose is to analyze the provided document and extract information. Your entire response must be a single, valid JSON object, and you must include **no other text, explanations, or conversational filler**.
 
 
 extraction: |
@@ -29,10 +43,7 @@ extraction: |
        - Omit any field not visible in the image
        - Format all dates as "DD/MM/YYYY"
        - Format gender as "M" or "F"
-
-    2. **Validation**:
-       - Never invent data - if information is unreadable, omit the field
+       - Never invent data, if information is unreadable, omit the field
     
-
     **Output format MUST be**:
     {{jsonPlaceholder}}
