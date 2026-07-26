@@ -621,6 +621,7 @@ async def classify_images(images: List[str], supported_documents_override: Optio
                 "temperature": 0.0
             }
 
+            content = None
             try:
                 result = await _vllm_request(CLASSIFIER_URL, payload)
                 if result is None:
@@ -638,7 +639,7 @@ async def classify_images(images: List[str], supported_documents_override: Optio
                     "reasoning": parsed.get("reasoning", "")
                 }
             except Exception as e:
-                logger.error(f"Classification error page {index}: {str(e)}")
+                logger.error(f"Classification error page {index}: {str(e)}\nContent: {content}", exc_info=True)
                 return {"pageIndex": index, "documentType": "unknown", "confidence": 0.0}
 
     tasks = [_classify_one(i, img) for i, img in enumerate(images)]
@@ -761,7 +762,7 @@ async def extract_content(
         json_data = json.loads(extract_json_content(content))
         return parse_data(json_data, schema)
     except (json.JSONDecodeError, ValueError, TypeError):
-        logger.error(f"Extraction JSON parse failed for {doc_type}: {content}")
+        logger.error(f"Extraction JSON parse failed for {doc_type}: {content}", exc_info=True)
         return None
 
 
