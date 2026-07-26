@@ -1,7 +1,7 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 import os
 import uuid
 from pathlib import Path
@@ -216,10 +216,18 @@ class DocParserException(Exception):
 
 
 
+class DocumentOverride(BaseModel):
+    """User-supplied document override for classification and extraction."""
+    id: str = Field(..., description="Document identifier")
+    description: str = Field(..., description="Human-readable document description")
+    schema: Dict[str, Any] = Field(..., description="Extraction schema for this document")
+
+
 class Base64FileRequest(BaseModel):
     """Request model for base64 encoded file"""
     filename: str = Field(..., description="Original filename with extension")
     content: str = Field(..., description="Base64 encoded file content")
+    documents: Optional[List[DocumentOverride]] = Field(default=None, description="Optional list of documents to override the default supported docs and schemas")
 
 
 def get_error_details(error: str, task_id: str):
@@ -569,11 +577,29 @@ def parse_data(response: dict, schema: dict) -> dict:
 
 
 
-async def classify_images(images: List[str]) -> List[dict]:
+def resolve_document_config(request: Base64FileRequest) -> tuple[Dict[str, str], Dict[str, Dict[str, Any]]]:
+    """Return the active supported document list and schemas for a request."""
+    if not request.documents:
+        return dict(supported_documents), dict(document_schemas)
 
+    supported_docs: Dict[str, str] = {}
+    schemas: Dict[str, Dict[str, Any]] = {}
+    for document_override in request.documents:
+        doc_id = str(document_override.id or "").strip()
+        if not doc_id:
+            continue
+        supported_docs[doc_id] = str(document_override.description or doc_id)
+        schemas[doc_id] = dict(document_override.schema or {})
+
+    return supported_docs, schemas
+
+
+async def classify_images(images: List[str], supported_documents_override: Optional[Dict[str, str]] = None) -> List[dict]:
+
+    active_supported_documents = supported_documents_override or supported_documents
     doc_types_list = "\n".join(
         f"| {doc_id} | {description} |"
-        for doc_id, description in supported_documents.items()
+        for doc_id, description in active_supported_documents.items()
     )
     user_prompt = prompt_config.get('classification', "").replace("{{listPlaceholder}}", doc_types_list)
     sys_prompt = prompt_config.get('classification_system', "")
@@ -630,12 +656,14 @@ def group_pages(
     classifications: List[dict],
     confidence_threshold: float = 0.0,
     max_noise_pages: int = 2,
+    supported_documents_override: Optional[Dict[str, str]] = None,
 ) -> List[dict]:
 
     if not classifications:
         return []
 
-    supported_set = set(supported_documents().keys())
+    active_supported_documents = supported_documents_override or supported_documents
+    supported_set = set(active_supported_documents.keys())
     groups: List[dict] = []
     current_type: Optional[str] = None
     current_indices: List[int] = []
@@ -689,9 +717,14 @@ def group_pages(
     return groups if seen_supported else []
 
 
-async def extract_content(images: List[str], doc_type: str) -> dict:
+async def extract_content(
+    images: List[str],
+    doc_type: str,
+    document_schemas_override: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> dict:
 
-    schema = document_schemas.get(doc_type, None)
+    active_document_schemas = document_schemas_override or document_schemas
+    schema = active_document_schemas.get(doc_type, None)
     if schema is None:
         logger.error(f"Unsupported document type for extraction: {doc_type}")
         return None
@@ -732,11 +765,15 @@ async def extract_content(images: List[str], doc_type: str) -> dict:
         return None
 
 
-async def analyze_images(images: List[str]) -> list:
+async def analyze_images(
+    images: List[str],
+    supported_documents_override: Optional[Dict[str, str]] = None,
+    document_schemas_override: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> list:
 
     try:
-        classifications = await classify_images(images) if CLASSIFIER_URL else []
-        groups = group_pages(classifications) if CLASSIFIER_URL else []
+        classifications = await classify_images(images, supported_documents_override=supported_documents_override) if CLASSIFIER_URL else []
+        groups = group_pages(classifications, supported_documents_override=supported_documents_override) if CLASSIFIER_URL else []
 
         if not CLASSIFIER_URL or len(groups) == 0:
             logger.info(f"Classifier {'skipped' if not CLASSIFIER_URL else 'no groups formed'}, extracting all pages as single group")
@@ -752,7 +789,11 @@ async def analyze_images(images: List[str]) -> list:
             confidence = max(group_conf) if group_conf else 0.0
 
             document_type = group.get("documentType", "unknown") or "unknown"
-            data = await extract_content(group_images, document_type)
+            data = await extract_content(
+                group_images,
+                document_type,
+                document_schemas_override=document_schemas_override,
+            )
 
             return {
                 "documentType": document_type,
@@ -865,6 +906,8 @@ async def process_file(
     start_time = time.perf_counter()
 
     try:
+        supported_documents_override: Optional[Dict[str, str]] = None
+        document_schemas_override: Optional[Dict[str, Dict[str, Any]]] = None
 
         content_type = request.headers.get("content-type", "")
         if "application/json" in content_type:
@@ -873,6 +916,7 @@ async def process_file(
                 req = Base64FileRequest(**body)
                 if contains_file(req):
                     file = decode_base64_file(req)
+                supported_documents_override, document_schemas_override = resolve_document_config(req)
             except HTTPException:
                 raise
             except Exception:
@@ -917,7 +961,11 @@ async def process_file(
             )
 
 
-        vllm_result = await analyze_images(images_to_analyze)
+        vllm_result = await analyze_images(
+            images_to_analyze,
+            supported_documents_override=supported_documents_override,
+            document_schemas_override=document_schemas_override,
+        )
         if len(vllm_result) == 0:
             await stats.inc_invalid(file_id)
             if SAVE_INVALID_FILES:
