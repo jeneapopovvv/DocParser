@@ -1,0 +1,13 @@
+{
+  "id": "cr_certificate",
+  "description": "Commercial Registration Certificate issued by the government",
+  "schema": {
+    "registrationNumber": "string",
+    "commercialName": "string",
+    "commercialNameArabic": "string",
+    "type": "string",
+    "status": "string",
+    "issueDate": "date",
+    "expiryDate": "date"
+  }
+}

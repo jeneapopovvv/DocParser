@@ -1,0 +1,12 @@
+{
+  "id": "iban",
+  "description": "Financial account statements from banking institutions",
+  "schema": {
+    "fullName": "string",
+    "bankAccountNumber": "string",
+    "iban": "string",
+    "branch": "string",
+    "date": "date",
+    "bic/swift": "string"
+  }
+}

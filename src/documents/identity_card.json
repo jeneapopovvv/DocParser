@@ -1,0 +1,13 @@
+{
+  "id": "identity_card",
+  "description": "Government ID",
+  "schema": {
+    "personalNumber": "number",
+    "nationality": "string",
+    "fullName": "string",
+    "fullNameArabic": "string",
+    "dateOfBirth": "date",
+    "expiryDate": "date",
+    "gender": "string"
+  }
+}

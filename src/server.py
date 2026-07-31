@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Request
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Request, Path as PathParam
 from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Any, Dict, List, Optional
@@ -20,7 +20,7 @@ import yaml
 import shutil
 import asyncio
 from contextlib import asynccontextmanager
-from config import supported_documents, document_schemas
+from document_store import DocumentStore
 
 
 
@@ -98,11 +98,12 @@ logger = logging.getLogger(__name__)
 
 # Shared httpx client with connection pooling (created on startup, closed on shutdown)
 _http_client: Optional[httpx.AsyncClient] = None
+document_store: Optional[DocumentStore] = None
 
 
 @asynccontextmanager
 async def lifespan(app):
-    global _http_client
+    global _http_client, document_store
     _http_client = httpx.AsyncClient(
         timeout=httpx.Timeout(VLLM_TIMEOUT, connect=10.0),
         limits=httpx.Limits(
@@ -111,6 +112,7 @@ async def lifespan(app):
             keepalive_expiry=300,
         ),
     )
+    document_store = DocumentStore()
     asyncio.create_task(_periodic_cleanup())
     yield
     if _http_client:
@@ -216,18 +218,36 @@ class DocParserException(Exception):
 
 
 
-class DocumentOverride(BaseModel):
-    """User-supplied document override for classification and extraction."""
-    id: str = Field(..., description="Document identifier")
-    description: str = Field(..., description="Human-readable document description")
+class DocumentCreate(BaseModel):
+    """Request model for creating a new document."""
+    id: str = Field(..., min_length=1, max_length=100, description="Unique document identifier")
+    description: str = Field(..., min_length=1, description="Human-readable document description")
     schema: Dict[str, Any] = Field(..., description="Extraction schema for this document")
+
+
+class DocumentUpdate(BaseModel):
+    """Request model for updating an existing document."""
+    description: str = Field(..., min_length=1, description="Human-readable document description")
+    schema: Dict[str, Any] = Field(..., description="Extraction schema for this document")
+
+
+class DocumentResponse(BaseModel):
+    """Response model for a document."""
+    id: str
+    description: str
+    schema: Dict[str, Any]
+
+
+class DocumentListResponse(BaseModel):
+    """Response model for listing documents."""
+    documents: List[DocumentResponse]
+    count: int
 
 
 class Base64FileRequest(BaseModel):
     """Request model for base64 encoded file"""
     filename: str = Field(..., description="Original filename with extension")
     content: str = Field(..., description="Base64 encoded file content")
-    documents: Optional[List[DocumentOverride]] = Field(default=None, description="Optional list of documents to override the default supported docs and schemas")
 
 
 def get_error_details(error: str, task_id: str):
@@ -612,26 +632,9 @@ def parse_data(response: dict, schema: dict) -> dict:
 
 
 
-def resolve_document_config(request: Base64FileRequest) -> tuple[Dict[str, str], Dict[str, Dict[str, Any]]]:
-    """Return the active supported document list and schemas for a request."""
-    if not request.documents:
-        return dict(supported_documents), dict(document_schemas)
+async def classify_images(images: List[str]) -> List[dict]:
 
-    supported_docs: Dict[str, str] = {}
-    schemas: Dict[str, Dict[str, Any]] = {}
-    for document_override in request.documents:
-        doc_id = str(document_override.id or "").strip()
-        if not doc_id:
-            continue
-        supported_docs[doc_id] = str(document_override.description or doc_id)
-        schemas[doc_id] = dict(document_override.schema or {})
-
-    return supported_docs, schemas
-
-
-async def classify_images(images: List[str], supported_documents_override: Optional[Dict[str, str]] = None) -> List[dict]:
-
-    active_supported_documents = supported_documents_override or supported_documents
+    active_supported_documents = document_store.supported_documents
     doc_types_list = "\n".join(
         f"| {doc_id} | {description} |"
         for doc_id, description in active_supported_documents.items()
@@ -691,14 +694,13 @@ async def classify_images(images: List[str], supported_documents_override: Optio
 def group_pages(
     classifications: List[dict],
     confidence_threshold: float = 0.0,
-    max_noise_pages: int = 2,
-    supported_documents_override: Optional[Dict[str, str]] = None,
+    max_noise_pages: int = 2
 ) -> List[dict]:
 
     if not classifications:
         return []
 
-    active_supported_documents = supported_documents_override or supported_documents
+    active_supported_documents = document_store.supported_documents
     supported_set = set(active_supported_documents.keys())
     groups: List[dict] = []
     current_type: Optional[str] = None
@@ -755,11 +757,10 @@ def group_pages(
 
 async def extract_content(
     images: List[str],
-    doc_type: str,
-    document_schemas_override: Optional[Dict[str, Dict[str, Any]]] = None,
+    doc_type: str
 ) -> dict:
 
-    active_document_schemas = document_schemas_override or document_schemas
+    active_document_schemas = document_store.document_schemas
     schema = active_document_schemas.get(doc_type, None)
     if schema is None:
         logger.error(f"Unsupported document type for extraction: {doc_type}")
@@ -802,14 +803,12 @@ async def extract_content(
 
 
 async def analyze_images(
-    images: List[str],
-    supported_documents_override: Optional[Dict[str, str]] = None,
-    document_schemas_override: Optional[Dict[str, Dict[str, Any]]] = None,
+    images: List[str]
 ) -> list:
 
     try:
-        classifications = await classify_images(images, supported_documents_override=supported_documents_override) if CLASSIFIER_URL else []
-        groups = group_pages(classifications, supported_documents_override=supported_documents_override) if CLASSIFIER_URL else []
+        classifications = await classify_images(images) if CLASSIFIER_URL else []
+        groups = group_pages(classifications) if CLASSIFIER_URL else []
 
         if not CLASSIFIER_URL or len(groups) == 0:
             logger.info(f"Classifier {'skipped' if not CLASSIFIER_URL else 'no groups formed'}, extracting all pages as single group")
@@ -827,8 +826,7 @@ async def analyze_images(
             document_type = group.get("documentType", "unknown") or "unknown"
             data = await extract_content(
                 group_images,
-                document_type,
-                document_schemas_override=document_schemas_override,
+                document_type
             )
 
             return {
@@ -942,9 +940,6 @@ async def process_file(
     start_time = time.perf_counter()
 
     try:
-        supported_documents_override: Optional[Dict[str, str]] = None
-        document_schemas_override: Optional[Dict[str, Dict[str, Any]]] = None
-
         content_type = request.headers.get("content-type", "")
         if "application/json" in content_type:
             try:
@@ -952,7 +947,6 @@ async def process_file(
                 req = Base64FileRequest(**body)
                 if contains_file(req):
                     file = decode_base64_file(req)
-                supported_documents_override, document_schemas_override = resolve_document_config(req)
             except HTTPException:
                 raise
             except Exception:
@@ -997,11 +991,7 @@ async def process_file(
             )
 
 
-        vllm_result = await analyze_images(
-            images_to_analyze,
-            supported_documents_override=supported_documents_override,
-            document_schemas_override=document_schemas_override,
-        )
+        vllm_result = await analyze_images(images_to_analyze)
         if len(vllm_result) == 0:
             await stats.inc_invalid(file_id)
             if SAVE_INVALID_FILES:
@@ -1035,6 +1025,82 @@ async def process_file(
         logger.error(f"[Task: {task_uuid}]. Error processing file: {str(e)}", exc_info=True)
         raise DocParserException(status_code=500, error="Failed to process file", task_id=task_uuid)
 
+
+
+@app.get("/documents", response_model=DocumentListResponse)
+async def list_documents():
+    """List all supported documents."""
+    if document_store is None:
+        raise HTTPException(status_code=503, detail="Document store not initialized")
+
+    documents = await document_store.list_documents()
+    return DocumentListResponse(
+        documents=[DocumentResponse(**doc) for doc in documents],
+        count=len(documents)
+    )
+
+
+@app.get("/documents/{doc_id}", response_model=DocumentResponse)
+async def get_document(doc_id: str = PathParam(..., description="Document ID")):
+    """Get a specific document by ID."""
+    if document_store is None:
+        raise HTTPException(status_code=503, detail="Document store not initialized")
+
+    document = await document_store.get_document(doc_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
+
+    return DocumentResponse(**document)
+
+
+@app.post("/documents", response_model=DocumentResponse, status_code=201)
+async def create_document(request: DocumentCreate):
+    """Create a new document type."""
+    if document_store is None:
+        raise HTTPException(status_code=503, detail="Document store not initialized")
+
+    try:
+        document = await document_store.create_document(
+            doc_id=request.id,
+            description=request.description,
+            schema=request.schema
+        )
+        return DocumentResponse(**document)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@app.put("/documents/{doc_id}", response_model=DocumentResponse)
+async def update_document(
+    request: DocumentUpdate,
+    doc_id: str = PathParam(..., description="Document ID")
+):
+    """Update an existing document type."""
+    if document_store is None:
+        raise HTTPException(status_code=503, detail="Document store not initialized")
+
+    try:
+        document = await document_store.update_document(
+            doc_id=doc_id,
+            description=request.description,
+            schema=request.schema
+        )
+        return DocumentResponse(**document)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.delete("/documents/{doc_id}")
+async def delete_document(doc_id: str = PathParam(..., description="Document ID")):
+    """Delete a document type."""
+    if document_store is None:
+        raise HTTPException(status_code=503, detail="Document store not initialized")
+
+    deleted = await document_store.delete_document(doc_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
+
+    return {"message": f"Document '{doc_id}' deleted successfully"}
 
 
 @app.get("/health")

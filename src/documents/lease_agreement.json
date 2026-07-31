@@ -1,0 +1,26 @@
+{
+  "id": "lease_agreement",
+  "description": "Lease agreement contract between landlord and tenant",
+  "schema": {
+    "landlords": [
+      {
+        "name": "string",
+        "email": "string",
+        "phone": "string",
+        "cpr": "string"
+      }
+    ],
+    "tenants": [
+      {
+        "name": "string",
+        "email": "string",
+        "phone": "string",
+        "cpr": "string"
+      }
+    ],
+    "propertyAddress": "string",
+    "propertyType": "string",
+    "leaseStartDate": "date",
+    "leaseEndDate": "date"
+  }
+}

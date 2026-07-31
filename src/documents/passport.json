@@ -1,0 +1,13 @@
+{
+  "id": "passport",
+  "description": "Passport",
+  "schema": {
+    "passportNumber": "string",
+    "nationality": "string",
+    "fullName": "string",
+    "fullNameArabic": "string",
+    "dateOfBirth": "date",
+    "expiryDate": "date",
+    "gender": "string"
+  }
+}

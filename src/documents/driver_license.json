@@ -1,0 +1,12 @@
+{
+  "id": "driver_license",
+  "description": "Driver license",
+  "schema": {
+    "licenseNumber": "number",
+    "nationality": "string",
+    "fullName": "string",
+    "fullNameArabic": "string",
+    "dateOfBirth": "date",
+    "gender": "string"
+  }
+}
