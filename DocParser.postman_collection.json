@@ -87,7 +87,7 @@
 				"method": "GET",
 				"header": [],
 				"url": {
-					"raw": "http://localhost:6060/documents/iban",
+					"raw": "http://localhost:6060/documents/{{DOC_ID}}",
 					"protocol": "http",
 					"host": [
 						"localhost"
@@ -95,7 +95,7 @@
 					"port": "6060",
 					"path": [
 						"documents",
-						"iban"
+						"{{DOC_ID}}"
 					]
 				}
 			},
@@ -144,7 +144,7 @@
 					}
 				},
 				"url": {
-					"raw": "http://localhost:6060/documents/birth_certificate",
+					"raw": "http://localhost:6060/documents/{{DOC_ID}}",
 					"protocol": "http",
 					"host": [
 						"localhost"
@@ -152,7 +152,7 @@
 					"port": "6060",
 					"path": [
 						"documents",
-						"birth_certificate"
+						"{{DOC_ID}}"
 					]
 				}
 			},
@@ -164,7 +164,7 @@
 				"method": "DELETE",
 				"header": [],
 				"url": {
-					"raw": "http://localhost:6060/documents/birth_certificate",
+					"raw": "http://localhost:6060/documents/{{DOC_ID}}",
 					"protocol": "http",
 					"host": [
 						"localhost"
@@ -172,7 +172,7 @@
 					"port": "6060",
 					"path": [
 						"documents",
-						"birth_certificate"
+						"{{DOC_ID}}"
 					]
 				}
 			},
@@ -196,6 +196,33 @@
 				}
 			},
 			"response": []
+		}
+	],
+	"event": [
+		{
+			"listen": "prerequest",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					""
+				]
+			}
+		},
+		{
+			"listen": "test",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					""
+				]
+			}
+		}
+	],
+	"variable": [
+		{
+			"key": "DOC_ID",
+			"value": "birth_certificate",
+			"type": "default"
 		}
 	]
 }
