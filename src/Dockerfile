@@ -9,7 +9,7 @@ RUN apt-get update && \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY config.py prompts.yaml server.py ./
+COPY config.py prompts.yaml server.py document_store.py ./
 
 EXPOSE 6060
 
