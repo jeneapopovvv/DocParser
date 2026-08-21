@@ -2,6 +2,9 @@
 
 Document parsing server that classifies and extracts structured data from document images using vLLM models.
 
+## Deploy/Redeploy
+./redeploy.sh
+
 ## API Endpoints
 
 ### `POST /process`
