@@ -50,6 +50,7 @@ services:
       - ./models/huggingface:/root/.cache/huggingface
     environment:
       - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
+      - HF_HUB_OFFLINE=${EXTRACTOR_HF_HUB_OFFLINE:-0}
     ipc: host
     deploy:
       resources:
@@ -93,6 +94,7 @@ services:
       - ./models/huggingface:/root/.cache/huggingface
     environment:
       - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
+      - HF_HUB_OFFLINE=${CLASSIFIER_HF_HUB_OFFLINE:-0}
     ipc: host
     deploy:
       resources:
