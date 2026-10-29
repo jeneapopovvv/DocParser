@@ -35,7 +35,7 @@ services:
     container_name: doc_parser_extractor
     command: >
       --model=Qwen/Qwen3.5-2B
-      --gpu-memory-utilization=0.4
+      --gpu-memory-utilization=0.35
       --max-num-seqs=10
       --max-model-len=6098
       --dtype=half
@@ -80,7 +80,7 @@ services:
     container_name: doc_parser_classifier
     command: >
       --model=Qwen/Qwen3.5-0.8B
-      --gpu-memory-utilization=0.22
+      --gpu-memory-utilization=0.15
       --max-num-seqs=10
       --max-model-len=3048
       --dtype=half
